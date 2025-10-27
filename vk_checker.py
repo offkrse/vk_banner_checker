@@ -85,35 +85,38 @@ def check_ads(account):
     logging.info(f"===== Проверка аккаунта: {user_name} =====")
 
     try:
-        # Получаем рекламные кампании
+        # 1️⃣ Получаем кампании
         ad_plans = get_vk("/api/v2/ad_plans.json", token).get("items", [])
-        logging.info(f"Найдено {len(ad_plans)} кампаний")
+        active_plans = [p for p in ad_plans if p.get("status") == "active"]
+        logging.info(f"Найдено {len(ad_plans)} кампаний, активных: {len(active_plans)}")
 
-        for plan in ad_plans:
+        for plan in active_plans:
             plan_id = plan["id"]
             plan_name = plan["name"]
 
             logging.info(f"▶ Кампания: {plan_name} (ID {plan_id})")
 
-            # Получаем группы кампании
+            # 2️⃣ Получаем группы кампании
             ad_groups = get_vk("/api/v2/ad_groups.json", token, params={"ad_plan_id": plan_id}).get("items", [])
-            logging.info(f"  ├─ Найдено групп: {len(ad_groups)}")
+            active_groups = [g for g in ad_groups if g.get("status") == "active"]
+            logging.info(f"  ├─ Найдено групп: {len(ad_groups)}, активных: {len(active_groups)}")
 
-            for group in ad_groups:
+            for group in active_groups:
                 group_id = group["id"]
                 group_name = group.get("name", "Без названия")
 
                 logging.info(f"  │  ├─ Группа: {group_name} (ID {group_id})")
 
-                # Получаем баннеры
+                # 3️⃣ Получаем баннеры
                 banners = get_vk("/api/v2/banners.json", token, params={"ad_group_id": group_id}).get("items", [])
-                logging.info(f"  │  │  ├─ Найдено баннеров: {len(banners)}")
+                active_banners = [b for b in banners if b.get("status") == "active"]
+                logging.info(f"  │  │  ├─ Найдено баннеров: {len(banners)}, активных: {len(active_banners)}")
 
-                for banner in banners:
+                for banner in active_banners:
                     banner_id = banner["id"]
                     banner_name = banner.get("name", f"Banner {banner_id}")
 
-                    # Получаем статистику за последние сутки
+                    # 4️⃣ Получаем статистику
                     date_to = datetime.today().strftime("%Y-%m-%d")
                     date_from = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -137,12 +140,9 @@ def check_ads(account):
                     spent = float(metrics.get("spent", 0))
                     cpa = float(metrics.get("vk", {}).get("cpa", 0))
 
-                    # Записываем данные по баннеру
-                    logging.info(
-                        f"  │  │  └─ {banner_name} (ID {banner_id}): spent={spent}, cpa={cpa}"
-                    )
+                    logging.info(f"  │  │  └─ {banner_name} (ID {banner_id}): spent={spent}, cpa={cpa}")
 
-                    # Проверяем условия отключения
+                    # Проверяем лимиты
                     if spent >= SPENT_LIMIT and cpa >= CPA_LIMIT:
                         try:
                             post_vk(f"/api/v2/banners/{banner_id}.json", token, data={"status": "blocked"})
