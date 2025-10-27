@@ -28,12 +28,7 @@ ACCOUNTS = [
         "name": "User1",
         "token": os.getenv("VK_TOKEN_USER1"),
         "telegram_chat": os.getenv("TELEGRAM_CHAT_USER1"),
-    },
-    {
-        "name": "User2",
-        "token": os.getenv("VK_TOKEN_USER2"),
-        "telegram_chat": os.getenv("TELEGRAM_CHAT_USER2"),
-    },
+    }
 ]
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
