@@ -82,7 +82,7 @@ def check_ads(account):
     try:
         # 1️⃣ Получаем кампании
         ad_plans = get_vk("/api/v2/ad_plans.json", token).get("items", [])
-        active_plans = [p for p in ad_plans if p.get("status") == "blocked"]
+        active_plans = [p for p in ad_plans if p.get("status") == "archived"]
         logging.info(f"Найдено {len(ad_plans)} кампаний, активных: {len(active_plans)}")
 
         for plan in active_plans:
@@ -93,7 +93,7 @@ def check_ads(account):
 
             # 2️⃣ Получаем группы кампании
             ad_groups = get_vk("/api/v2/ad_groups.json", token, params={"ad_plan_id": plan_id}).get("items", [])
-            active_groups = [g for g in ad_groups if g.get("status") == "blocked"]
+            active_groups = [g for g in ad_groups if g.get("status") == "archived"]
             logging.info(f"  ├─ Найдено групп: {len(ad_groups)}, активных: {len(active_groups)}")
 
             for group in active_groups:
@@ -104,7 +104,7 @@ def check_ads(account):
 
                 # 3️⃣ Получаем баннеры
                 banners = get_vk("/api/v2/banners.json", token, params={"ad_group_id": group_id}).get("items", [])
-                active_banners = [b for b in banners if b.get("status") == "blocked"]
+                active_banners = [b for b in banners if b.get("status") == "archived"]
                 logging.info(f"  │  │  ├─ Найдено баннеров: {len(banners)}, активных: {len(active_banners)}")
 
                 for banner in active_banners:
@@ -140,7 +140,7 @@ def check_ads(account):
                     # Проверяем лимиты
                     if spent >= SPENT_LIMIT and cpa >= CPA_LIMIT:
                         try:
-                            post_vk(f"/api/v2/banners/{banner_id}.json", token, data={"status": "blocked"})
+                            post_vk(f"/api/v2/banners/{banner_id}.json", token, data={"status": "archived"})
                             msg = f"[{plan_name}] [{group_name}] [{banner_name}] — отключен (spent={spent}, cpa={cpa})"
                             send_telegram_message(chat_id, msg)
                             logging.warning(f"  │  │     🚫 Отключен баннер: {msg}")
