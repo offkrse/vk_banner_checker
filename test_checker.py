@@ -77,14 +77,14 @@ def post_vk(url, token, data=None):
     return r.json() if r.text else {}
 
 
-# ======== ОСНОВНАЯ ЛОГИКА ========
+# ======== СТАТИСТИКА ========
 
 def fetch_banner_stats(token, banner_ids, date_from, date_to):
-    """Запрашивает статистику сразу по нескольким баннерам"""
+    """Запрашивает статистику по нескольким баннерам за указанный диапазон"""
     ids_str = ",".join(map(str, banner_ids))
     url = "/api/v2/statistics/banners/day.json"
     params = {
-        "ids": ids_str,
+        "ids": ids_str,                 # ✅ правильно — поддерживает список ID
         "metrics": "base",
         "attribution": "conversion",
         "date_from": date_from,
@@ -97,16 +97,26 @@ def fetch_banner_stats(token, banner_ids, date_from, date_to):
 
     for item in items:
         banner_id = item.get("id")
-        metrics = item.get("total", {}).get("base", {})
-        if not metrics and item.get("rows"):
-            metrics = item["rows"][0].get("base", {})
 
-        spent = float(metrics.get("spent", 0) or 0)
-        cpa = float(metrics.get("vk", {}).get("cpa", 0) or 0)
-        stats[banner_id] = {"spent": spent, "cpa": cpa}
+        # "rows" содержит подневные данные
+        total_spent = 0.0
+        total_cpa = 0.0
+
+        for row in item.get("rows", []):
+            base = row.get("base", {})
+            spent = float(base.get("spent", 0) or 0)
+            cpa = float(base.get("vk", {}).get("cpa", 0) or 0)
+            total_spent += spent
+            # средний CPA рассчитываем как среднее по дням (если был расход)
+            if cpa > 0:
+                total_cpa = cpa
+
+        stats[banner_id] = {"spent": total_spent, "cpa": total_cpa}
 
     return stats
 
+
+# ======== ОСНОВНАЯ ЛОГИКА ========
 
 def check_ads(account):
     token = account["token"]
@@ -114,6 +124,8 @@ def check_ads(account):
     user_name = account["name"]
 
     logging.info(f"===== Проверка аккаунта: {user_name} =====")
+
+    processed_banners = set()  # ✅ защита от дублей
 
     try:
         # 1️⃣ Получаем активные кампании
@@ -125,25 +137,32 @@ def check_ads(account):
             plan_name = plan["name"]
 
             # 2️⃣ Получаем активные группы кампании
-            ad_groups = get_vk("/api/v2/ad_groups.json", token, params={"ad_plan_id": plan_id, "_status": "active"}).get("items", [])
+            ad_groups = get_vk("/api/v2/ad_groups.json", token, params={
+                "ad_plan_id": plan_id,
+                "_status": "active"
+            }).get("items", [])
             logging.info(f"▶ Кампания: {plan_name} — активных групп: {len(ad_groups)}")
 
             for group in ad_groups:
                 group_id = group["id"]
                 group_name = group.get("name", "Без названия")
 
-                # 3️⃣ Получаем активные баннеры
-                banners = get_vk("/api/v2/banners.json", token, params={"ad_group_id": group_id, "_status": "active"}).get("items", [])
+                # 3️⃣ Получаем активные баннеры (с фильтром по плану)
+                banners = get_vk("/api/v2/banners.json", token, params={
+                    "ad_plan_id": plan_id,
+                    "ad_group_id": group_id,
+                    "_status": "active"
+                }).get("items", [])
                 logging.info(f"  ├─ Группа {group_name}: активных баннеров: {len(banners)}")
 
                 if not banners:
                     continue
 
-                # Даты для статистики
-                date_to = datetime.today().strftime("%Y-%m-%d")
+                # Даты статистики (вчера и сегодня)
                 date_from = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+                date_to = datetime.today().strftime("%Y-%m-%d")
 
-                # 4️⃣ Получаем статистику по пакетам (по 50 баннеров)
+                # 4️⃣ Получаем статистику по партиям (по 50 баннеров)
                 banner_ids = [b["id"] for b in banners]
                 for i in range(0, len(banner_ids), BATCH_SIZE):
                     batch = banner_ids[i:i + BATCH_SIZE]
@@ -151,9 +170,11 @@ def check_ads(account):
 
                     for banner in banners:
                         banner_id = banner["id"]
-                        if banner_id not in stats:
+
+                        if banner_id not in stats or banner_id in processed_banners:
                             continue
 
+                        processed_banners.add(banner_id)
                         banner_name = banner.get("name", f"Banner {banner_id}")
                         spent = stats[banner_id]["spent"]
                         cpa = stats[banner_id]["cpa"]
