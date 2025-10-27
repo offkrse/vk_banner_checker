@@ -50,22 +50,31 @@ def send_telegram_message(chat_id: str, text: str):
         logging.error(f"Ошибка при отправке сообщения в Telegram: {e}")
 
 
-def get_vk(url, token, params=None):
-    """GET-запрос к VK ADS API"""
+import time
+
+def get_vk(url, token, params=None, retries=5):
+    """GET-запрос к VK ADS API с ограничением скорости и повторными попытками"""
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"{VK_HOST}{url}", headers=headers, params=params)
-    if r.status_code != 200:
-        raise Exception(f"Ошибка VK GET {url}: {r.status_code} {r.text}")
-    return r.json()
+
+    for attempt in range(retries):
+        r = requests.get(f"{VK_HOST}{url}", headers=headers, params=params)
+
+        # Если слишком много запросов — ждём
+        if r.status_code == 429:
+            logging.warning("⏳ Лимит запросов VK Ads достигнут. Ожидание 2 секунды...")
+            time.sleep(2)
+            continue
+
+        if r.status_code != 200:
+            raise Exception(f"Ошибка VK GET {url}: {r.status_code} {r.text}")
+
+        # добавим небольшую задержку, чтобы не долбить API
+        time.sleep(0.3)
+        return r.json()
+
+    raise Exception(f"Ошибка VK GET {url}: слишком много попыток после 429")
 
 
-def post_vk(url, token, data=None):
-    """POST-запрос к VK ADS API"""
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.post(f"{VK_HOST}{url}", headers=headers, json=data)
-    if r.status_code not in (200, 204):
-        raise Exception(f"Ошибка VK POST {url}: {r.status_code} {r.text}")
-    return r
 
 
 def check_ads(account):
