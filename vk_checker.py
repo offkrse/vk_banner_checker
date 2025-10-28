@@ -197,12 +197,13 @@ class VkAdsApi:
         result: Dict[int, Dict[str, Any]] = {}
         for it in data.get("items", []):
             _id = int(it.get("id"))
-            total = it.get("total", {})
-            metrics = total.get("metrics", {}) if isinstance(total, dict) else {}
+            total = it.get("total", {}) or {}
+            base = total.get("base", {}) or {}
+            vk = base.get("vk", {}) or {}
             result[_id] = {
-                "spent_all_time": float(metrics.get("spent", 0) or 0),
-                "cpc_all_time": float(metrics.get("cpc", 0) or 0),
-                "vk.cpa_all_time": float(metrics.get("vk.cpa", 0) or 0),
+                "spent_all_time": float(base.get("spent", 0) or 0),
+                "cpc_all_time": float(base.get("cpc", 0) or 0),
+                "vk.cpa_all_time": float(vk.get("cpa", 0) or 0),
             }
         return result
 
@@ -222,14 +223,15 @@ class VkAdsApi:
         result: Dict[int, Dict[str, Any]] = {}
         for it in data.get("items", []):
             _id = int(it.get("id"))
-            total = it.get("total", {})
+            total = it.get("total", {}) or {}
+            base = total.get("base", {}) or {}
+            vk = base.get("vk", {}) or {}
             rows = it.get("rows", []) or []
-            met = total.get("metrics", {}) if isinstance(total, dict) else {}
             result[_id] = {
-                "spent": float(met.get("spent", 0) or 0),
-                "cpc": float(met.get("cpc", 0) or 0),
-                "vk.cpa": float(met.get("vk.cpa", 0) or 0),
-                "rows": rows,  # на всякий — вся деталка
+                "spent": float(base.get("spent", 0) or 0),
+                "cpc": float(base.get("cpc", 0) or 0),
+                "vk.cpa": float(vk.get("cpa", 0) or 0),
+                "rows": rows,
             }
         return result
 
@@ -275,9 +277,9 @@ class VkAdsApi:
 # ==========================
 
 def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
-    today = dt.date.today()
-    since = today - dt.timedelta(days=n_days)
-    return since.strftime("%Y-%m-%d"), (today - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        today = dt.date.today()
+        since = today - dt.timedelta(days=n_days)
+        return since.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
 def process_account(acc: AccountConfig, tg_token: str) -> None:
