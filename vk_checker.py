@@ -310,7 +310,28 @@ class VkAdsApi:
 
         except Exception as e:
             logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в исключения: {e}")
-    
+
+    def get_banner_name(self, banner_id: int) -> str:
+        """
+        Получает имя баннера по его ID.
+        GET /api/v2/banners/<id>.json?fields=name
+        """
+        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
+        try:
+            resp = req_with_retry(
+                "GET",
+                url,
+                headers=self.headers,
+                params={"fields": "name"},
+                timeout=STATS_TIMEOUT,
+            )
+            data = resp.json()
+            name = data.get("name", "")
+            return name or ""
+        except Exception as e:
+            logger.warning(f"Не удалось получить имя баннера {banner_id}: {e}")
+            return ""
+
     
     # --- Отключение объявления (статус blocked) ---
     def disable_banner(self, banner_id: int) -> bool:
@@ -417,16 +438,17 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         # Уведомление в TG
         reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
         date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
-        banner_name = b.get("name") or "Без названия"
+        banner_name = api.get_banner_name(bid) or "Без названия"
         text = (
-            f"<b>[{acc.name}] Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
+            f"<b>[{acc.name}]<b>"
+            f"Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
             f"Причина: {reason_short}\n\n"
             f"<b>Статистика:</b>\n"
             f"Потрачено за всё время = {spent_all_time:.2f} RUB\n"
             f"За период с {date_from_fmt} по {date_to_fmt}:\n"
-            f"  Потрачено = {spent:.2f}\n"
-            f"  Цена клика = {cpc:.2f}\n"
-            f"  Цена результата = {vk_cpa:.2f}"
+            f"    - Потрачено = {spent:.2f}\n"
+            f"    - Цена клика = {cpc:.2f}\n"
+            f"    - Цена результата = {vk_cpa:.2f}"
         )
         tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
 
