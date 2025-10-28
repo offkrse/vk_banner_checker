@@ -99,7 +99,7 @@ ACCOUNTS: List[AccountConfig] = [
 # ==========================
 LOG_DIR = pathlib.Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
-log_file = LOG_DIR / "vk_ads_auto_killer.log"
+log_file = LOG_DIR / "vk_checker.log"
 
 logging.basicConfig(
     level=logging.INFO,
