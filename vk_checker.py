@@ -112,6 +112,26 @@ def load_env() -> None:
     if not load_dotenv():
         logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
 
+def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
+    """Возвращает простую текстовую причину"""
+    cond_cpc = (spent >= flt.min_spent_for_cpc) and (cpc == 0 or cpc >= flt.cpc_bad_value)
+    cond_cpa = (spent >= flt.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= flt.cpa_bad_value)
+    if cond_cpc and cond_cpa:
+        return "Дорогая цена клика и результата"
+    elif cond_cpc:
+        return "Дорогая цена клика"
+    elif cond_cpa:
+        return "Дорогой результат"
+    return "—"
+    
+
+def fmt_date(d: str) -> str:
+    """Преобразует дату YYYY-MM-DD → DD.MM"""
+    try:
+        dt_obj = dt.datetime.strptime(d, "%Y-%m-%d")
+        return dt_obj.strftime("%d.%m")
+    except Exception:
+        return d
 
 def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[str, Any] | None = None,
                    json_body: Dict[str, Any] | None = None, timeout: int = 30) -> requests.Response:
@@ -345,13 +365,18 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         logger.warning(f"    ⇒ {status_msg}")
 
         # Уведомление в TG
+        reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
+        date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
+        banner_name = b.get("name") or "Без названия"
         text = (
-            f"<b>[{acc.name}] Баннер #{bid}</b> — {status_msg}\n"
-            f"Причина: {reason}\n\n"
+            f"<b>[{acc.name}] Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
+            f"Причина: {reason_short}\n\n"
             f"<b>Статистика:</b>\n"
-            f"Все время: spent_all_time={spent_all_time:.2f} RUB\n"
-            f"За период {date_from}..{date_to}: spent={spent:.2f}, cpc={cpc:.2f}, vk.cpa={vk_cpa:.2f}\n"
-            f"Последние 2 дня: <code>{json.dumps(last2_rows, ensure_ascii=False)}</code>"
+            f"Потрачено за всё время = {spent_all_time:.2f} RUB\n"
+            f"За период с {date_from_fmt} по {date_to_fmt}:\n"
+            f"  Потрачено = {spent:.2f}\n"
+            f"  Цена клика = {cpc:.2f}\n"
+            f"  Цена результата = {vk_cpa:.2f}"
         )
         tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
 
