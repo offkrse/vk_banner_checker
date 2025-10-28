@@ -337,32 +337,27 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         last2_rows = last2_map.get(bid, [])
 
         logger.info(
-            (
-                f"[BANNER {bid} | GROUP {agid}]\n"
-                f"    spent_all_time={spent_all_time:.2f} RUB\n"
-                f"    period[{date_from}..{date_to}]: spent={spent:.2f}, cpc={cpc:.2f}, vk.cpa={vk_cpa:.2f}\n"
-                f"    last_2_days_rows={json.dumps(last2_rows, ensure_ascii=False)}"
-            )
+                f"[BANNER {bid} | GROUP {agid}] {date_from}..{date_to}: spent = {spent:.2f}, cpc = {cpc:.2f}, vk.cpa = {vk_cpa:.2f} [sat = {spent_all_time:.2f}]"
         )
 
         # Если объявление уже потратило больше порога — не трогаем
         if spent_all_time > SPENT_ALL_TIME_DONT_TOUCH_RUB:
             logger.info(
-                f"    ▶ Пропускаем: spent_all_time>{SPENT_ALL_TIME_DONT_TOUCH_RUB} (не трогаем по правилу)"
+                f"▶ Пропускаем: spent_all_time>{SPENT_ALL_TIME_DONT_TOUCH_RUB} (не трогаем по правилу)"
             )
             continue
 
         # Проверка фильтра
         bad, reason = acc.flt.violates(spent=spent, cpc=cpc, vk_cpa=vk_cpa)
         if not bad:
-            logger.info("    ✔ Прошёл фильтр — ОК")
+            logger.info("✔ Прошёл фильтр — ОК")
             continue
 
         # Отключаем объяву
-        logger.warning(f"    ✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
+        logger.warning(f"✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
         disabled = api.disable_banner(bid)
         status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
-        logger.warning(f"    ⇒ {status_msg}")
+        logger.warning(f"⇒ {status_msg}")
 
         # Уведомление в TG
         reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
