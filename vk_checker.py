@@ -274,11 +274,11 @@ class VkAdsApi:
             two_days[_id] = d.get("rows", [])
         return two_days
 
-        def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
-        """
-        Добавляет в список исключений все активные баннеры из указанной кампании.
-        Кампания -> группы (ad_groups) -> баннеры (banners)
-        """
+    def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
+        
+        #Добавляет в список исключений все активные баннеры из указанной кампании.
+        #Кампания -> группы (ad_groups) -> баннеры (banners)
+        
         try:
             # 1️⃣ Получаем группы кампании
             url_groups = f"{self.base_url}/api/v2/ad_groups.json"
