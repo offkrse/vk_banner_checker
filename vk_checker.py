@@ -277,9 +277,9 @@ class VkAdsApi:
 # ==========================
 
 def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
-        today = dt.date.today()
-        since = today - dt.timedelta(days=n_days)
-        return since.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+    today = dt.date.today()
+    since = today - dt.timedelta(days=n_days)
+    return since.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
 def process_account(acc: AccountConfig, tg_token: str) -> None:
