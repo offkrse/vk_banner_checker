@@ -275,97 +275,55 @@ class VkAdsApi:
         return two_days
 
     def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
-    """
-    Добавляет в список исключений все активные баннеры из указанной кампании.
-    Сначала пытается получить напрямую по campaign_id (через ad_plan_id),
-    если не поддерживается — делает обход по группам.
-    """
-    seen = set(exceptions_banners)
-    try:
-        # 1️⃣ Быстрая попытка: получить все баннеры напрямую по ad_plan_id
-        url_banners = f"{self.base_url}/api/v2/banners.json"
-        offset = 0
-        added_fast = 0
-        while True:
-            params_b = {
-                "limit": 200,
-                "offset": offset,
-                "ad_plan_id": campaign_id,  # фильтр по кампании
-                "_status": "active",
-            }
-            resp_b = req_with_retry("GET", url_banners, headers=self.headers, params=params_b, timeout=STATS_TIMEOUT)
-            if resp_b.status_code == 400 and "ERR_WRONG_PARAMETER" in resp_b.text:
-                raise ValueError("ad_plan_id unsupported, fallback to groups")
-            data_b = resp_b.json()
-            batch_b = data_b.get("items", [])
-            for b in batch_b:
-                bid = int(b.get("id") or 0)
-                if bid and bid not in seen:
-                    exceptions_banners.append(bid)
-                    seen.add(bid)
-                    added_fast += 1
-            if len(batch_b) < 200:
-                break
-            offset += 200
+        """
+        Добавляет в список исключений все активные баннеры из указанной кампании.
+        Делает два запроса:
+          1) /api/v2/ad_plans/<id>.json?fields=ad_groups — получает все группы
+          2) /api/v2/ad_groups/<group_id>.json?fields=banners — получает баннеры каждой группы
+        """
+        seen = set(exceptions_banners)
+        try:
+            # 1️⃣ Получаем группы кампании
+            url_plan = f"{self.base_url}/api/v2/ad_plans/{campaign_id}.json"
+            resp_plan = req_with_retry(
+                "GET",
+                url_plan,
+                headers=self.headers,
+                params={"fields": "ad_groups"},
+                timeout=STATS_TIMEOUT,
+            )
+            data_plan = resp_plan.json()
+            ad_groups = data_plan.get("ad_groups", [])
+            logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)}")
 
-        logger.info(f"Кампания {campaign_id}: добавлено баннеров напрямую {added_fast}")
-        return  # успех, выходим без обхода групп
-
-    except Exception as e:
-        logger.warning(f"Прямой запрос баннеров по кампании {campaign_id} не удался: {e}. Пробуем через группы...")
-
-    # 2️⃣ Медленный обход по группам, если прямой фильтр не поддерживается
-    try:
-        url_groups = f"{self.base_url}/api/v2/ad_groups.json"
-        offset = 0
-        ad_groups: List[Dict[str, Any]] = []
-        while True:
-            params = {
-                "limit": 200,
-                "offset": offset,
-                "ad_plan_id": campaign_id,
-                "status": "active",
-            }
-            resp = req_with_retry("GET", url_groups, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-            data = resp.json()
-            batch = data.get("items", [])
-            ad_groups.extend(batch)
-            if len(batch) < 200:
-                break
-            offset += 200
-
-        logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)}")
-
-        for g in ad_groups:
-            gid = g.get("id")
-            if not gid:
-                continue
-            offset_b = 0
-            while True:
-                params_b = {
-                    "limit": 200,
-                    "offset": offset_b,
-                    "ad_group_id": gid,
-                    "_status": "active",
-                }
-                resp_b = req_with_retry("GET", url_banners, headers=self.headers, params=params_b, timeout=STATS_TIMEOUT)
-                data_b = resp_b.json()
-                batch_b = data_b.get("items", [])
-                for b in batch_b:
+            # 2️⃣ Для каждой группы запрашиваем баннеры
+            added = 0
+            for g in ad_groups:
+                gid = g.get("id")
+                if not gid:
+                    continue
+                url_group = f"{self.base_url}/api/v2/ad_groups/{gid}.json"
+                resp_group = req_with_retry(
+                    "GET",
+                    url_group,
+                    headers=self.headers,
+                    params={"fields": "banners"},
+                    timeout=STATS_TIMEOUT,
+                )
+                data_group = resp_group.json()
+                banners = data_group.get("banners", [])
+                for b in banners:
                     bid = int(b.get("id") or 0)
                     if bid and bid not in seen:
                         exceptions_banners.append(bid)
                         seen.add(bid)
-                if len(batch_b) < 200:
-                    break
-                offset_b += 200
+                        added += 1
+            logger.info(f"Кампания {campaign_id}: добавлено баннеров в исключения {added}")
 
-        logger.info(f"Кампания {campaign_id}: добавлено баннеров через группы {len(seen)}")
-
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id}: {e}")
-
-
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в исключения: {e}")
+    
+    
     # --- Отключение объявления (статус blocked) ---
     def disable_banner(self, banner_id: int) -> bool:
         
