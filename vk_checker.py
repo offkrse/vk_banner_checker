@@ -247,27 +247,27 @@ class VkAdsApi:
 
     # --- Отключение объявления (статус blocked) ---
     def disable_banner(self, banner_id: int) -> bool:
-    
-    # Отключает объявление (меняет статус на blocked)
-    # POST /api/v2/banners/<banner_id>.json
-    
-    url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
-    try:
-        resp = req_with_retry(
-            method="POST",
-            url=url,
-            headers={**self.headers, "Content-Type": "application/json"},
-            json_body={"status": "blocked"},
-            timeout=WRITE_TIMEOUT,
-        )
-        if resp.status_code == 204:
-            logger.info(f"Баннер {banner_id} успешно отключен (HTTP 204)")
-            return True
-        logger.warning(f"Не удалось отключить баннер {banner_id}: {resp.status_code} {resp.text}")
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка при отключении баннера {banner_id}: {e}")
-        return False
+        
+        # Отключает объявление (меняет статус на blocked)
+        # POST /api/v2/banners/<banner_id>.json
+        
+        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
+        try:
+            resp = req_with_retry(
+                method="POST",
+                url=url,
+                headers={**self.headers, "Content-Type": "application/json"},
+                json_body={"status": "blocked"},
+                timeout=WRITE_TIMEOUT,
+            )
+            if resp.status_code == 204:
+                logger.info(f"Баннер {banner_id} успешно отключен (HTTP 204)")
+                return True
+            logger.warning(f"Не удалось отключить баннер {banner_id}: {resp.status_code} {resp.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка при отключении баннера {banner_id}: {e}")
+            return False
 
 
 # ==========================
