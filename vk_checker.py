@@ -187,7 +187,82 @@ class VkAdsApi:
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
         }
+        
+    # --- Список кампаний ---
+    def list_campaigns(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Возвращает список всех кампаний"""
+        url = f"{self.base_url}/api/v2/campaigns.json"
+        offset = 0
+        items: List[Dict[str, Any]] = []
+        while True:
+            params = {"limit": min(limit, 200), "offset": offset}
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            batch = data.get("items", [])
+            items.extend(batch)
+            if len(batch) < params["limit"]:
+                break
+            offset += params["limit"]
+        return items
 
+
+    # --- Список ad_groups (групп объявлений) в кампании ---
+    def list_groups_in_campaign(
+        self,
+        campaign_id: int,
+        limit: int = 1000,
+        exceptions_banners: Optional[List[int]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Возвращает список ad_groups (групп объявлений) по campaign_id.
+        Если передан список exceptions_banners, добавляет в него все баннеры из этих групп.
+        """
+        url = f"{self.base_url}/api/v2/ad_groups.json"
+        offset = 0
+        items: List[Dict[str, Any]] = []
+        while True:
+            params = {"limit": min(limit, 200), "offset": offset, "campaign_id": campaign_id}
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            batch = data.get("items", [])
+            items.extend(batch)
+            if len(batch) < params["limit"]:
+                break
+            offset += params["limit"]
+
+        # --- Если нужно — сразу достаём баннеры из групп ---
+        if exceptions_banners is not None:
+            for g in items:
+                group_id = g.get("id")
+                if not group_id:
+                    continue
+                try:
+                    banners = self.list_banners_in_group(group_id)
+                    for b in banners:
+                        bid = int(b.get("id") or 0)
+                        if bid:
+                            exceptions_banners.append(bid)
+                except Exception as e:
+                    log("WARN", f"Не удалось получить баннеры группы {group_id} из кампании {campaign_id}: {e}")
+
+        return items
+
+    def list_banners_in_group(self, group_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Возвращает список баннеров по группе объявлений"""
+        url = f"{self.base_url}/api/v2/banners.json"
+        offset = 0
+        items: List[Dict[str, Any]] = []
+        while True:
+            params = {"limit": min(limit, 200), "offset": offset, "ad_group_id": group_id}
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            batch = data.get("items", [])
+            items.extend(batch)
+            if len(batch) < params["limit"]:
+                break
+            offset += params["limit"]
+        return items
+   
     # --- Список баннеров (объявлений) ---
     def list_active_banners(self, limit: int = 1000) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/api/v2/banners.json"
@@ -314,6 +389,13 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
     api = VkAdsApi(token=acc.token)
 
+    # --- Если есть исключённые кампании, собираем из них баннеры ---
+    if acc.exceptions_campaigns:
+        log("INFO", f"Исключённые кампании: {acc.exceptions_campaigns}")
+        for camp_id in acc.exceptions_campaigns:
+            api.list_groups_in_campaign(camp_id, exceptions_banners=acc.exceptions_banners)
+        log("INFO", f"Добавлено исключённых баннеров: {len(acc.exceptions_banners)}")
+    
     # 1) Список активных объявлений
     banners = api.list_active_banners()
     if not banners:
@@ -345,10 +427,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
 
         # --- Исключения ---
         if bid in acc.exceptions_banners:
-            log("INFO", f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
+            logger.info(f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
             continue
         if agid in acc.exceptions_campaigns:
-            log("INFO", f"▶ Пропускаем баннер {bid} (Кампания {agid}): ИСКЛЮЧЕНИЕ")
+            logger.info(f"▶ Пропускаем баннер {bid} (Кампания {agid}): ИСКЛЮЧЕНИЕ")
             continue
             
         logger.info(
