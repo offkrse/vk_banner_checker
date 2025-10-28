@@ -440,7 +440,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
         banner_name = api.get_banner_name(bid) or "Без названия"
         text = (
-            f"<b>[{acc.name}]</b>"
+            f"<b>[{acc.name}]</b>\n"
             f"<b>Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
             f"Причина: {reason_short}\n\n"
             f"<b>Статистика:</b>\n"
