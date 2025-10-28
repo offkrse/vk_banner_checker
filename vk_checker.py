@@ -24,7 +24,7 @@ RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
-N_DAYS_DEFAULT = 7  # Можно переопределить отдельно для каждого кабинета
+N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
 
 # Порог "не трогать, если уже потратили":
 SPENT_ALL_TIME_DONT_TOUCH_RUB = 2000
@@ -80,7 +80,7 @@ ACCOUNTS: List[AccountConfig] = [
         name="MAIN",
         token_env="VK_TOKEN_MAIN",
         chat_id_env="TG_CHAT_ID_MAIN",
-        n_days=7,
+        n_days=2,
         flt=BaseFilter(),  # можно переопределять пороги per-account
     ),
     # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
