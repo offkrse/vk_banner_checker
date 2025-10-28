@@ -1,159 +1,419 @@
-import requests
-import logging
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+"""
+VK ADS auto-checker & auto-killer
+
+Функции:
+1) Для каждого кабинета VK:
+   - Получает список АКТИВНЫХ объявлений (banners).
+   - Подтягивает статистику по каждому объявлению:
+        * spent_all_time (summary за всё время)
+        * spent, cpc, vk.cpa за последние N дней (total за период)
+        * подробка поминутно по последним 2 дням (сохраняется отдельно)
+   - Если spent_all_time > 2000 — объявление больше не трогаем (только логируем).
+   - Иначе прогоняем через фильтр (можно общий по умолчанию или индивидуальный для кабинета/объявления):
+        Базовый фильтр:
+            отключаем объявление, если
+            (spent >= 80 и (cpc == 0 или cpc >= 80))
+            или (spent >= 300 и (vk.cpa == 0 или vk.cpa >= 300))
+   - Если объявление не проходит фильтр — выключаем (status=blocked) и шлём уведомление в личку в Telegram.
+
+Требования по окружению:
+- Python 3.10+
+- pip install -r requirements.txt (см. ниже список)
+- .env файл с токенами и чатами, например:
+    # Telegram
+    TG_BOT_TOKEN=123456:ABC...
+    TG_CHAT_ID_MAIN=123456789
+
+    # VK ADS (по одному на кабинет)
+    VK_TOKEN_MAIN=vk1.a....
+    VK_TOKEN_CLIENT1=vk1.a....
+
+Как маппить кабинеты:
+- Ниже в ACCOUNTS вы описываете кабинеты и указываете имя переменной из .env c токеном и id чата.
+
+Примечания:
+- Эндпоинты VK ADS v2 вынесены в BASE_URL и вызовы реализованы через requests. Если ваш прод-хост иной — укажите свой.
+- Смена статуса баннера реализована в виде PATCH/POST запроса. Уточните фактический метод и путь в вашей инсталляции (см. TODO ниже).
+- Добавлены детальные логи, включая статистику по каждой объяве. Логи пишутся в консоль и в файл logs/vk_ads_auto_killer.log.
+
+"""
+from __future__ import annotations
+
 import os
+import sys
+import time
 import json
+import math
+import logging
+import pathlib
+import datetime as dt
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-# ======== ЗАГРУЗКА ОКРУЖЕНИЯ ========
-load_dotenv()
+import requests
+from dotenv import load_dotenv
 
-# ======== НАСТРОЙКИ ========
-SPENT_LIMIT = 300       # лимит по потраченным средствам
-CPA_LIMIT = 200         # лимит по стоимости за результат
-VK_HOST = "https://ads.vk.com"
-LOG_FILE = "vk_ads.log"
-# ============================
+# ==========================
+# Константы и настройки
+# ==========================
+BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
+STATS_TIMEOUT = 30
+WRITE_TIMEOUT = 30
+RETRY_COUNT = 3
+RETRY_BACKOFF = 1.8
 
-# Настройка логгера
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
+N_DAYS_DEFAULT = 7  # Можно переопределить отдельно для каждого кабинета
 
-# Аккаунты VK ADS
-ACCOUNTS = [
-    {
-        "name": "User1",
-        "token": os.getenv("VK_TOKEN_USER1"),
-        "telegram_chat": os.getenv("TELEGRAM_CHAT_USER1"),
-    }
+# Порог "не трогать, если уже потратили":
+SPENT_ALL_TIME_DONT_TOUCH_RUB = 2000
+
+# Базовый фильтр согласно ТЗ
+@dataclass
+class BaseFilter:
+    min_spent_for_cpc: float = 80.0
+    cpc_bad_value: float = 80.0  # cpc == 0 или >= 80
+    min_spent_for_cpa: float = 300.0
+    cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
+
+    def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
+        cond1 = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
+        cond2 = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
+        reason = []
+        if cond1:
+            reason.append(
+                f"spent≥{self.min_spent_for_cpc} & (cpc==0 or cpc≥{self.cpc_bad_value}) => (spent={spent:.2f}, cpc={cpc:.2f})"
+            )
+        if cond2:
+            reason.append(
+                f"spent≥{self.min_spent_for_cpa} & (vk.cpa==0 or vk.cpa≥{self.cpa_bad_value}) => (spent={spent:.2f}, vk.cpa={vk_cpa:.2f})"
+            )
+        return (cond1 or cond2, "; ".join(reason) if reason else "")
+
+# Описание кабинета
+@dataclass
+class AccountConfig:
+    name: str
+    token_env: str  # имя переменной окружения с VK токеном
+    chat_id_env: str  # имя переменной окружения с TG chat id
+    n_days: int = N_DAYS_DEFAULT
+    flt: BaseFilter = field(default_factory=BaseFilter)
+
+    @property
+    def token(self) -> str:
+        t = os.environ.get(self.token_env)
+        if not t:
+            raise RuntimeError(f"Не найден токен в .env: {self.token_env}")
+        return t
+
+    @property
+    def chat_id(self) -> str:
+        c = os.environ.get(self.chat_id_env)
+        if not c:
+            raise RuntimeError(f"Не найден chat id в .env: {self.chat_id_env}")
+        return c
+
+# Список ваших кабинетов (добавьте/измените по аналогии)
+ACCOUNTS: List[AccountConfig] = [
+    AccountConfig(
+        name="MAIN",
+        token_env="VK_TOKEN_MAIN",
+        chat_id_env="TG_CHAT_ID_MAIN",
+        n_days=7,
+        flt=BaseFilter(),  # можно переопределять пороги per-account
+    ),
+    # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
+    #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ]
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# ==========================
+# Логирование
+# ==========================
+LOG_DIR = pathlib.Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+log_file = LOG_DIR / "vk_ads_auto_killer.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("vk_ads_auto")
+
+# ==========================
+# Вспомогательные функции
+# ==========================
+
+def load_env() -> None:
+    if not load_dotenv():
+        logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
 
 
-# ======== ФУНКЦИИ ========
+def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[str, Any] | None = None,
+                   json_body: Dict[str, Any] | None = None, timeout: int = 30) -> requests.Response:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"{resp.status_code} {resp.text}")
+            return resp
+        except Exception as e:
+            last_exc = e
+            sleep_for = RETRY_BACKOFF ** (attempt - 1)
+            logger.warning(f"{method} {url} попытка {attempt}/{RETRY_COUNT} не удалась: {e}. Повтор через {sleep_for:.1f}s")
+            time.sleep(sleep_for)
+    assert last_exc is not None
+    raise last_exc
 
-def send_telegram_message(chat_id: str, text: str):
-    """Отправить сообщение в Telegram"""
+
+def tg_notify(bot_token: str, chat_id: str, text: str) -> None:
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": chat_id, "text": text})
+        r = requests.post(url, json=payload, timeout=20)
+        if r.status_code != 200:
+            logger.error(f"TG notify failed: {r.status_code} {r.text}")
     except Exception as e:
-        logging.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+        logger.error(f"TG notify exception: {e}")
 
 
-import time
+# ==========================
+# VK ADS API обёртки (v2)
+# ==========================
 
-def get_vk(url, token, params=None, retries=5):
-    """GET-запрос к VK ADS API с ограничением скорости и повторными попытками"""
-    headers = {"Authorization": f"Bearer {token}"}
+class VkAdsApi:
+    def __init__(self, token: str, base_url: str = BASE_URL):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.headers = {
+            # Проверьте схему авторизации в вашей инсталляции (Bearer/Token/кастомный заголовок)
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
 
-    for attempt in range(retries):
-        r = requests.get(f"{VK_HOST}{url}", headers=headers, params=params)
+    # --- Список баннеров (объявлений) ---
+    def list_active_banners(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/api/v2/banners.json"
+        offset = 0
+        items: List[Dict[str, Any]] = []
+        while True:
+            params = {
+                "limit": min(limit, 200),
+                "offset": offset,
+                "_status": "active",
+                # Можно дополнительно ограничить группами: "_ad_group_status": "active",
+            }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            batch = data.get("items", [])
+            items.extend(batch)
+            logger.info(f"Получено активных баннеров: +{len(batch)} (всего {len(items)})")
+            if len(batch) < params["limit"]:
+                break
+            offset += params["limit"]
+        return items
 
-        # Если слишком много запросов — ждём
-        if r.status_code == 429:
-            logging.warning("⏳ Лимит запросов VK Ads достигнут. Ожидание 2 секунды...")
-            time.sleep(2)
+    # --- Статистика summary (за всё время) ---
+    def stats_summary_banners(self, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        if not banner_ids:
+            return {}
+        url = f"{self.base_url}/api/v2/statistics/banners/summary.json"
+        params = {
+            "id": ",".join(map(str, banner_ids)),
+            "metrics": "base",
+        }
+        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+        data = resp.json()
+        result: Dict[int, Dict[str, Any]] = {}
+        for it in data.get("items", []):
+            _id = int(it.get("id"))
+            total = it.get("total", {})
+            metrics = total.get("metrics", {}) if isinstance(total, dict) else {}
+            result[_id] = {
+                "spent_all_time": float(metrics.get("spent", 0) or 0),
+                "cpc_all_time": float(metrics.get("cpc", 0) or 0),
+                "vk.cpa_all_time": float(metrics.get("vk.cpa", 0) or 0),
+            }
+        return result
+
+    # --- Статистика за период (day) с total ---
+    def stats_period_banners(self, banner_ids: List[int], date_from: str, date_to: str) -> Dict[int, Dict[str, Any]]:
+        if not banner_ids:
+            return {}
+        url = f"{self.base_url}/api/v2/statistics/banners/day.json"
+        params = {
+            "id": ",".join(map(str, banner_ids)),
+            "date_from": date_from,
+            "date_to": date_to,
+            "metrics": "base",
+        }
+        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+        data = resp.json()
+        result: Dict[int, Dict[str, Any]] = {}
+        for it in data.get("items", []):
+            _id = int(it.get("id"))
+            total = it.get("total", {})
+            rows = it.get("rows", []) or []
+            met = total.get("metrics", {}) if isinstance(total, dict) else {}
+            result[_id] = {
+                "spent": float(met.get("spent", 0) or 0),
+                "cpc": float(met.get("cpc", 0) or 0),
+                "vk.cpa": float(met.get("vk.cpa", 0) or 0),
+                "rows": rows,  # на всякий — вся деталка
+            }
+        return result
+
+    # --- Статистика за ПОСЛЕДНИЕ 2 дня (поко-дневно) ---
+    def stats_last_two_days(self, banner_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        today = dt.date.today()
+        date_from = (today - dt.timedelta(days=2)).strftime("%Y-%m-%d")
+        date_to = (today - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        period = self.stats_period_banners(banner_ids, date_from, date_to)
+        # Возвращаем только rows (подневка) в отдельной структуре
+        two_days: Dict[int, List[Dict[str, Any]]] = {}
+        for _id, d in period.items():
+            two_days[_id] = d.get("rows", [])
+        return two_days
+
+    # --- Отключение объявления (статус blocked) ---
+    def disable_banner(self, banner_id: int) -> bool:
+    """
+    Отключает объявление (меняет статус на blocked)
+    POST /api/v2/banners/<banner_id>.json
+    """
+    url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
+    try:
+        resp = req_with_retry(
+            method="POST",
+            url=url,
+            headers={**self.headers, "Content-Type": "application/json"},
+            json_body={"status": "blocked"},
+            timeout=WRITE_TIMEOUT,
+        )
+        if resp.status_code == 204:
+            logger.info(f"Баннер {banner_id} успешно отключен (HTTP 204)")
+            return True
+        logger.warning(f"Не удалось отключить баннер {banner_id}: {resp.status_code} {resp.text}")
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка при отключении баннера {banner_id}: {e}")
+        return False
+
+
+# ==========================
+# Основная логика
+# ==========================
+
+def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
+    today = dt.date.today()
+    since = today - dt.timedelta(days=n_days)
+    return since.strftime("%Y-%m-%d"), (today - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def process_account(acc: AccountConfig, tg_token: str) -> None:
+    logger.info("=" * 80)
+    logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
+    api = VkAdsApi(token=acc.token)
+
+    # 1) Список активных объявлений
+    banners = api.list_active_banners()
+    if not banners:
+        logger.info("Активных объявлений не найдено")
+        return
+    banner_ids = [int(b["id"]) for b in banners if "id" in b]
+    logger.info(f"Всего активных объявлений: {len(banner_ids)}")
+
+    # 2) Стата за всё время
+    sum_map = api.stats_summary_banners(banner_ids)
+
+    # 3) Стата за N дней
+    date_from, date_to = daterange_for_last_n_days(acc.n_days)
+    period_map = api.stats_period_banners(banner_ids, date_from, date_to)
+
+    # 4) Последние 2 дня подневно (в отдельную переменную)
+    last2_map = api.stats_last_two_days(banner_ids)
+
+    # 5) Пройтись по объявлениям и применить логику
+    for b in banners:
+        bid = int(b["id"])
+        agid = int(b.get("ad_group_id", 0) or 0)
+        spent_all_time = sum_map.get(bid, {}).get("spent_all_time", 0.0)
+        period = period_map.get(bid, {})
+        spent = float(period.get("spent", 0.0))
+        cpc = float(period.get("cpc", 0.0))
+        vk_cpa = float(period.get("vk.cpa", 0.0))
+        last2_rows = last2_map.get(bid, [])
+
+        logger.info(
+            (
+                f"[BANNER {bid} | GROUP {agid}]\n"
+                f"    spent_all_time={spent_all_time:.2f} RUB\n"
+                f"    period[{date_from}..{date_to}]: spent={spent:.2f}, cpc={cpc:.2f}, vk.cpa={vk_cpa:.2f}\n"
+                f"    last_2_days_rows={json.dumps(last2_rows, ensure_ascii=False)}"
+            )
+        )
+
+        # Если объявление уже потратило больше порога — не трогаем
+        if spent_all_time > SPENT_ALL_TIME_DONT_TOUCH_RUB:
+            logger.info(
+                f"    ▶ Пропускаем: spent_all_time>{SPENT_ALL_TIME_DONT_TOUCH_RUB} (не трогаем по правилу)"
+            )
             continue
 
-        if r.status_code != 200:
-            raise Exception(f"Ошибка VK GET {url}: {r.status_code} {r.text}")
+        # Проверка фильтра
+        bad, reason = acc.flt.violates(spent=spent, cpc=cpc, vk_cpa=vk_cpa)
+        if not bad:
+            logger.info("    ✔ Прошёл фильтр — ОК")
+            continue
 
-        # добавим небольшую задержку, чтобы не долбить API
-        time.sleep(0.3)
-        return r.json()
+        # Отключаем объяву
+        logger.warning(f"    ✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
+        disabled = api.disable_banner(bid)
+        status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
+        logger.warning(f"    ⇒ {status_msg}")
 
-    raise Exception(f"Ошибка VK GET {url}: слишком много попыток после 429")
-
-
-
-
-def check_ads(account):
-    token = account["token"]
-    chat_id = account["telegram_chat"]
-    user_name = account["name"]
-
-    logging.info(f"===== Проверка аккаунта: {user_name} =====")
-
-    try:
-        # 1️⃣ Получаем кампании
-        ad_plans = get_vk("/api/v2/ad_plans.json", token).get("items", [])
-        active_plans = [p for p in ad_plans if p.get("status") == "active"]
-        logging.info(f"Найдено {len(ad_plans)} кампаний, активных: {len(active_plans)}")
-
-        for plan in active_plans:
-            plan_id = plan["id"]
-            plan_name = plan["name"]
-
-            logging.info(f"▶ Кампания: {plan_name} (ID {plan_id})")
-
-            # 2️⃣ Получаем группы кампании
-            ad_groups = get_vk("/api/v2/ad_groups.json", token, params={"ad_plan_id": plan_id}).get("items", [])
-            active_groups = [g for g in ad_groups if g.get("status") == "active"]
-            logging.info(f"  ├─ Найдено групп: {len(ad_groups)}, активных: {len(active_groups)}")
-
-            for group in active_groups:
-                group_id = group["id"]
-                group_name = group.get("name", "Без названия")
-
-                logging.info(f"  │  ├─ Группа: {group_name} (ID {group_id})")
-
-                # 3️⃣ Получаем баннеры
-                banners = get_vk("/api/v2/banners.json", token, params={"ad_group_id": group_id}).get("items", [])
-                active_banners = [b for b in banners if b.get("status") == "active"]
-                logging.info(f"  │  │  ├─ Найдено баннеров: {len(banners)}, активных: {len(active_banners)}")
-
-                for banner in active_banners:
-                    banner_id = banner["id"]
-                    banner_name = banner.get("name", f"Banner {banner_id}")
-
-                    # 4️⃣ Получаем статистику
-                    date_to = datetime.today().strftime("%Y-%m-%d")
-                    date_from = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-                    stats_url = "/api/v2/statistics/banners/summary.json"
-                    params = {
-                        "id": banner_id,
-                        "metrics": "base",
-                        "attribution": "conversion",
-                        "date_from": date_from,
-                        "date_to": date_to,
-                    }
-
-                    stat_data = get_vk(stats_url, token, params=params)
-                    items = stat_data.get("items", [])
-
-                    if not items:
-                        logging.info(f"  │  │  └─ {banner_name}: нет данных статистики")
-                        continue
-
-                    metrics = items[0]["total"]["base"]
-                    spent = float(metrics.get("spent", 0))
-                    cpa = float(metrics.get("vk", {}).get("cpa", 0))
-
-                    logging.info(f"  │  │  └─ {banner_name} (ID {banner_id}): spent={spent}, cpa={cpa}")
-
-                    # Проверяем лимиты
-                    if spent >= SPENT_LIMIT and cpa >= CPA_LIMIT:
-                        try:
-                            post_vk(f"/api/v2/banners/{banner_id}.json", token, data={"status": "blocked"})
-                            msg = f"[{plan_name}] [{group_name}] [{banner_name}] — отключен (spent={spent}, cpa={cpa})"
-                            send_telegram_message(chat_id, msg)
-                            logging.warning(f"  │  │     🚫 Отключен баннер: {msg}")
-                        except Exception as e:
-                            logging.error(f"  │  │     ❌ Ошибка при блокировке баннера {banner_id}: {e}")
-
-    except Exception as e:
-        logging.error(f"Ошибка при обработке аккаунта {user_name}: {e}")
+        # Уведомление в TG
+        text = (
+            f"<b>[{acc.name}] Баннер #{bid}</b> — {status_msg}\n"
+            f"Причина: {reason}\n\n"
+            f"<b>Статистика:</b>\n"
+            f"Все время: spent_all_time={spent_all_time:.2f} RUB\n"
+            f"За период {date_from}..{date_to}: spent={spent:.2f}, cpc={cpc:.2f}, vk.cpa={vk_cpa:.2f}\n"
+            f"Последние 2 дня: <code>{json.dumps(last2_rows, ensure_ascii=False)}</code>"
+        )
+        tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
 
 
-# ======== ТОЧКА ВХОДА ========
-if __name__ == "__main__":
-    logging.info(f"\n\n===== Запуск проверки {datetime.now()} =====")
+# ==========================
+# Точка входа
+# ==========================
+
+def main():
+    load_env()
+
+    tg_token = os.environ.get("TG_BOT_TOKEN")
+    if not tg_token:
+        raise RuntimeError("В .env должен быть TG_BOT_TOKEN")
+
+    logger.info("Старт VK ADS авто-проверки/отключалки")
+
     for acc in ACCOUNTS:
-        check_ads(acc)
-    logging.info("===== Проверка завершена =====\n")
+        try:
+            process_account(acc, tg_token)
+        except Exception as e:
+            logger.exception(f"Ошибка обработки кабинета {acc.name}: {e}")
+
+    logger.info("Готово")
+
+
+if __name__ == "__main__":
+    main()
