@@ -247,10 +247,10 @@ class VkAdsApi:
 
     # --- Отключение объявления (статус blocked) ---
     def disable_banner(self, banner_id: int) -> bool:
-    """
-    Отключает объявление (меняет статус на blocked)
-    POST /api/v2/banners/<banner_id>.json
-    """
+    
+    # Отключает объявление (меняет статус на blocked)
+    # POST /api/v2/banners/<banner_id>.json
+    
     url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
     try:
         resp = req_with_retry(
