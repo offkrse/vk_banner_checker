@@ -262,18 +262,6 @@ class VkAdsApi:
             }
         return result
 
-    # --- Статистика за ПОСЛЕДНИЕ 2 дня (поко-дневно) ---
-    def stats_last_two_days(self, banner_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
-        today = dt.date.today()
-        date_from = (today - dt.timedelta(days=2)).strftime("%Y-%m-%d")
-        date_to = (today - dt.timedelta(days=1)).strftime("%Y-%m-%d")
-        period = self.stats_period_banners(banner_ids, date_from, date_to)
-        # Возвращаем только rows (подневка) в отдельной структуре
-        two_days: Dict[int, List[Dict[str, Any]]] = {}
-        for _id, d in period.items():
-            two_days[_id] = d.get("rows", [])
-        return two_days
-
     def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
         """
         Добавляет в список исключений все активные баннеры из указанной кампании.
@@ -385,10 +373,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     date_from, date_to = daterange_for_last_n_days(acc.n_days)
     period_map = api.stats_period_banners(banner_ids, date_from, date_to)
 
-    # 4) Последние 2 дня подневно (в отдельную переменную)
-    last2_map = api.stats_last_two_days(banner_ids)
-
-    # 5) Пройтись по объявлениям и применить логику
+    # 4) Пройтись по объявлениям и применить логику
     for b in banners:
         bid = int(b["id"])
         agid = int(b.get("ad_group_id", 0) or 0)
@@ -397,7 +382,6 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         spent = float(period.get("spent", 0.0))
         cpc = float(period.get("cpc", 0.0))
         vk_cpa = float(period.get("vk.cpa", 0.0))
-        last2_rows = last2_map.get(bid, [])
 
         # --- Исключения ---
         if bid in acc.exceptions_banners:
