@@ -84,7 +84,7 @@ def fetch_banner_stats(token, banner_ids, date_from, date_to):
     ids_str = ",".join(map(str, banner_ids))
     url = "/api/v2/statistics/banners/day.json"
     params = {
-        "ids": ids_str,                 # ✅ правильно — поддерживает список ID
+        "ids": ids_str,                 # ✅ корректный параметр
         "metrics": "base",
         "attribution": "conversion",
         "date_from": date_from,
@@ -98,19 +98,18 @@ def fetch_banner_stats(token, banner_ids, date_from, date_to):
     for item in items:
         banner_id = item.get("id")
 
-        # "rows" содержит подневные данные
         total_spent = 0.0
-        total_cpa = 0.0
+        total_goals = 0.0
 
         for row in item.get("rows", []):
             base = row.get("base", {})
             spent = float(base.get("spent", 0) or 0)
-            cpa = float(base.get("vk", {}).get("cpa", 0) or 0)
+            goals = float(base.get("vk", {}).get("goals", 0) or 0)
             total_spent += spent
-            # средний CPA рассчитываем как среднее по дням (если был расход)
-            if cpa > 0:
-                total_cpa = cpa
+            total_goals += goals
 
+        # корректный CPA за период
+        total_cpa = round(total_spent / total_goals, 2) if total_goals > 0 else 0.0
         stats[banner_id] = {"spent": total_spent, "cpa": total_cpa}
 
     return stats
@@ -147,7 +146,7 @@ def check_ads(account):
                 group_id = group["id"]
                 group_name = group.get("name", "Без названия")
 
-                # 3️⃣ Получаем активные баннеры (с фильтром по плану)
+                # 3️⃣ Получаем активные баннеры (строгий фильтр)
                 banners = get_vk("/api/v2/banners.json", token, params={
                     "ad_plan_id": plan_id,
                     "ad_group_id": group_id,
@@ -170,6 +169,10 @@ def check_ads(account):
 
                     for banner in banners:
                         banner_id = banner["id"]
+
+                        # фильтр по принадлежности кампании
+                        if banner.get("ad_plan_id") != plan_id:
+                            continue
 
                         if banner_id not in stats or banner_id in processed_banners:
                             continue
