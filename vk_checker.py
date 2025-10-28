@@ -243,7 +243,7 @@ class VkAdsApi:
                         if bid:
                             exceptions_banners.append(bid)
                 except Exception as e:
-                    log("WARN", f"Не удалось получить баннеры группы {group_id} из кампании {campaign_id}: {e}")
+                    logger.info(f"Не удалось получить баннеры группы {group_id} из кампании {campaign_id}: {e}")
 
         return items
 
@@ -391,10 +391,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
 
     # --- Если есть исключённые кампании, собираем из них баннеры ---
     if acc.exceptions_campaigns:
-        log("INFO", f"Исключённые кампании: {acc.exceptions_campaigns}")
+        logger.info(f"Исключённые кампании: {acc.exceptions_campaigns}")
         for camp_id in acc.exceptions_campaigns:
             api.list_groups_in_campaign(camp_id, exceptions_banners=acc.exceptions_banners)
-        log("INFO", f"Добавлено исключённых баннеров: {len(acc.exceptions_banners)}")
+        logger.info(f"Добавлено исключённых баннеров: {len(acc.exceptions_banners)}")
     
     # 1) Список активных объявлений
     banners = api.list_active_banners()
