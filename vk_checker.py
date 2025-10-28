@@ -55,10 +55,14 @@ class BaseFilter:
 @dataclass
 class AccountConfig:
     name: str
-    token_env: str  # имя переменной окружения с VK токеном
-    chat_id_env: str  # имя переменной окружения с TG chat id
+    token_env: str
+    chat_id_env: str
     n_days: int = N_DAYS_DEFAULT
     flt: BaseFilter = field(default_factory=BaseFilter)
+
+    # Исключения (по умолчанию пустые)
+    exceptions_campaigns: List[int] = field(default_factory=list)
+    exceptions_banners: List[int] = field(default_factory=list)
 
     @property
     def token(self) -> str:
@@ -74,6 +78,7 @@ class AccountConfig:
             raise RuntimeError(f"Не найден chat id в .env: {self.chat_id_env}")
         return c
 
+
 # Список ваших кабинетов (добавьте/измените по аналогии)
 ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
@@ -82,6 +87,8 @@ ACCOUNTS: List[AccountConfig] = [
         chat_id_env="TG_CHAT_ID_MAIN",
         n_days=2,
         flt=BaseFilter(),  # можно переопределять пороги per-account
+        exceptions_campaigns=[10622280],
+        exceptions_banners=[186325972],
     ),
     # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
     #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
@@ -336,6 +343,14 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         vk_cpa = float(period.get("vk.cpa", 0.0))
         last2_rows = last2_map.get(bid, [])
 
+        # --- Исключения ---
+        if bid in acc.exceptions_banners:
+            log("INFO", f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
+            continue
+        if agid in acc.exceptions_campaigns:
+            log("INFO", f"▶ Пропускаем баннер {bid} (Кампания {agid}): ИСКЛЮЧЕНИЕ")
+            continue
+            
         logger.info(
                 f"[BANNER {bid} | GROUP {agid}] {date_from}..{date_to}: spent = {spent:.2f}, cpc = {cpc:.2f}, vk.cpa = {vk_cpa:.2f} [sat = {spent_all_time:.2f}]"
         )
