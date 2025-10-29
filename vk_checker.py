@@ -488,7 +488,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             continue
             
         logger.info(
-                f"[BANNER {bid} | GROUP {agid}] {date_from}..{date_to}: spent = {spent:.2f}, cpc = {cpc:.2f}, vk.cpa = {vk_cpa:.2f} [sat = {spent_all_time:.2f}]"
+                f"[BANNER {bid} | GROUP {agid}]: spent = {spent:.2f}, cpc = {cpc:.2f}, vk.cpa = {vk_cpa:.2f} [sat = {spent_all_time:.2f}]"
         )
 
         # Если объявление уже потратило больше порога — не трогаем
