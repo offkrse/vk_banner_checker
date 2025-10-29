@@ -510,13 +510,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     for b in banners:
         bid = int(b["id"])
         agid = int(b.get("ad_group_id", 0) or 0)
-        # --- Фильтр: разрешённые кампании и баннеры ---
-        if acc.allowed_banners or acc.allowed_campaigns:
-            if acc.allowed_banners and bid not in acc.allowed_banners:
+        # --- Фильтр: разрешённые баннеры ---
+        if acc.allowed_banners:
+            if bid not in acc.allowed_banners:
                 logger.info(f"▶ Пропускаем баннер {bid}: не входит в allowed_banners")
-                continue
-            if acc.allowed_campaigns and agid not in acc.allowed_campaigns:
-                logger.info(f"▶ Пропускаем баннер {bid} (кампания {agid}): не входит в allowed_campaigns")
                 continue
 
         # --- Фильтр по дате создания, если указан ---
