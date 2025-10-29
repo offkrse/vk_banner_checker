@@ -59,10 +59,14 @@ class AccountConfig:
     chat_id_env: str
     n_days: int = N_DAYS_DEFAULT
     flt: BaseFilter = field(default_factory=BaseFilter)
-
+    # Разрешенные 
+    allowed_campaigns: List[int] = field(default_factory=list)
+    allowed_banners: List[int] = field(default_factory=list)
     # Исключения (по умолчанию пустые)
     exceptions_campaigns: List[int] = field(default_factory=list)
     exceptions_banners: List[int] = field(default_factory=list)
+    # Дата создания баннера
+    banner_date_create: Optional[str] = None
 
     @property
     def token(self) -> str:
@@ -87,8 +91,11 @@ ACCOUNTS: List[AccountConfig] = [
         chat_id_env="TG_CHAT_ID_MAIN",
         n_days=2,
         flt=BaseFilter(),  # можно переопределять пороги per-account
-        exceptions_campaigns=[10622280],
-        exceptions_banners=[186325972],
+        banner_date_create=None,
+        allowed_campaigns=[],
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
     ),
     # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
     #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
@@ -311,6 +318,29 @@ class VkAdsApi:
         except Exception as e:
             logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в исключения: {e}")
 
+    def get_banner_created(self, banner_id: int) -> Optional[dt.datetime]:
+        """
+        Получает дату создания баннера.
+        GET /api/v2/banners/<id>.json?fields=created
+        """
+        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
+        try:
+            resp = req_with_retry(
+                "GET",
+                url,
+                headers=self.headers,
+                params={"fields": "created"},
+                timeout=STATS_TIMEOUT,
+            )
+            data = resp.json()
+            created_str = data.get("created")
+            if created_str:
+                # Пример: "2025-10-28 14:39:40"
+                return dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            logger.warning(f"Не удалось получить дату создания баннера {banner_id}: {e}")
+        return None
+
     def get_banner_name(self, banner_id: int) -> str:
         """
         Получает имя баннера по его ID.
@@ -398,6 +428,26 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     for b in banners:
         bid = int(b["id"])
         agid = int(b.get("ad_group_id", 0) or 0)
+        # --- Фильтр: разрешённые кампании и баннеры ---
+        if acc.allowed_banners or acc.allowed_campaigns:
+            if acc.allowed_banners and bid not in acc.allowed_banners:
+                logger.info(f"▶ Пропускаем баннер {bid}: не входит в allowed_banners")
+                continue
+            if acc.allowed_campaigns and agid not in acc.allowed_campaigns:
+                logger.info(f"▶ Пропускаем баннер {bid} (кампания {agid}): не входит в allowed_campaigns")
+                continue
+
+        # --- Фильтр по дате создания, если указан ---
+        if acc.banner_date_create:
+            try:
+                dt_cutoff = dt.datetime.strptime(acc.banner_date_create, "%d.%m.%Y")
+                created_at = api.get_banner_created(bid)
+                if created_at and created_at.date() < dt_cutoff.date():
+                    logger.info(f"▶ Пропускаем баннер {bid}: создан {created_at.date()}, до {dt_cutoff.date()}")
+                    continue
+            except Exception as e:
+                logger.warning(f"Ошибка проверки даты создания баннера {bid}: {e}")
+
         spent_all_time = sum_map.get(bid, {}).get("spent_all_time", 0.0)
         period = period_map.get(bid, {})
         spent = float(period.get("spent", 0.0))
