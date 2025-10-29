@@ -269,6 +269,63 @@ class VkAdsApi:
             }
         return result
 
+    def add_banners_from_allowed_campaign(self, campaign_id: int, allowed_banners: List[int]) -> None:
+        """
+        Добавляет в список разрешённых баннеров все активные баннеры из указанной кампании.
+        Делает два запроса:
+          1) /api/v2/ad_plans/<id>.json?fields=ad_groups — получает все группы
+          2) /api/v2/ad_groups/<group_id>.json?fields=banners — получает баннеры каждой группы
+        """
+        seen = set(allowed_banners)
+        try:
+            # 1️⃣ Получаем группы кампании
+            time.sleep(0.5)  # ⏳ чтобы не спамить API
+            url_plan = f"{self.base_url}/api/v2/ad_plans/{campaign_id}.json"
+            resp_plan = req_with_retry(
+                "GET",
+                url_plan,
+                headers=self.headers,
+                params={"fields": "ad_groups"},
+                timeout=STATS_TIMEOUT,
+            )
+            data_plan = resp_plan.json()
+            ad_groups = data_plan.get("ad_groups", [])
+            logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)} (для allowed)")
+    
+            # 2️⃣ Для каждой группы запрашиваем баннеры
+            added = 0
+            for g in ad_groups:
+                gid = g.get("id")
+                if not gid:
+                    continue
+                
+                time.sleep(0.4)  # ⏳ пауза между запросами групп (анти-лимит)
+                url_group = f"{self.base_url}/api/v2/ad_groups/{gid}.json"
+                resp_group = req_with_retry(
+                    "GET",
+                    url_group,
+                    headers=self.headers,
+                    params={"fields": "banners"},
+                    timeout=STATS_TIMEOUT,
+                )
+                data_group = resp_group.json()
+                banners = data_group.get("banners", [])
+                for b in banners:
+                    bid = int(b.get("id") or 0)
+                    if bid and bid not in seen:
+                        allowed_banners.append(bid)
+                        seen.add(bid)
+                        added += 1
+                        # 💡 небольшая микрозадержка при массовом добавлении (если групп много)
+                        if added % 10 == 0:
+                            time.sleep(0.2)
+    
+            logger.info(f"Кампания {campaign_id}: добавлено баннеров в allowed {added}")
+    
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в allowed: {e}")
+
+
     def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
         """
         Добавляет в список исключений все активные баннеры из указанной кампании.
@@ -429,6 +486,11 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             api.add_banners_from_campaign_to_exceptions(camp_id, acc.exceptions_banners)
         logger.info(f"Итоговый список исключённых баннеров: {len(acc.exceptions_banners)}")
 
+    if acc.allowed_campaigns:
+        for camp_id in acc.allowed_campaigns:
+            api.add_banners_from_allowed_campaign(camp_id, acc.allowed_banners)
+        logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
+        
     # 1) Список активных объявлений
     banners = api.list_active_banners()
     if not banners:
