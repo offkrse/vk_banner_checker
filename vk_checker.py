@@ -322,45 +322,65 @@ class VkAdsApi:
         """
         Получает дату создания баннера.
         GET /api/v2/banners/<id>.json?fields=created
+        Добавлен автоповтор и пауза для обхода лимитов API.
         """
         url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
-        try:
-            resp = req_with_retry(
-                "GET",
-                url,
-                headers=self.headers,
-                params={"fields": "created"},
-                timeout=STATS_TIMEOUT,
-            )
-            data = resp.json()
-            created_str = data.get("created")
-            if created_str:
-                # Пример: "2025-10-28 14:39:40"
-                return dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
-        except Exception as e:
-            logger.warning(f"Не удалось получить дату создания баннера {banner_id}: {e}")
+        for attempt in range(1, 4):
+            try:
+                time.sleep(0.4)  # ⏳ пауза между запросами для снижения нагрузки
+                resp = req_with_retry(
+                    "GET",
+                    url,
+                    headers=self.headers,
+                    params={"fields": "created"},
+                    timeout=STATS_TIMEOUT,
+                )
+                if resp.status_code == 429:
+                    logger.warning(f"⚠️ Rate limit при запросе created баннера {banner_id}, попытка {attempt}")
+                    time.sleep(1.5 * attempt)
+                    continue
+                
+                data = resp.json()
+                created_str = data.get("created")
+                if created_str:
+                    # Пример: "2025-10-28 14:39:40"
+                    return dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+                else:
+                    logger.debug(f"Баннер {banner_id}: поле 'created' отсутствует в ответе")
+                    return None
+    
+            except Exception as e:
+                logger.warning(f"Не удалось получить дату создания баннера {banner_id}: {e}")
+                time.sleep(1.0 * attempt)
         return None
 
+
     def get_banner_name(self, banner_id: int) -> str:
-        """
-        Получает имя баннера по его ID.
-        GET /api/v2/banners/<id>.json?fields=name
-        """
+        #Получает имя баннера по его ID.
+        #GET /api/v2/banners/<id>.json?fields=name
         url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
-        try:
-            resp = req_with_retry(
-                "GET",
-                url,
-                headers=self.headers,
-                params={"fields": "name"},
-                timeout=STATS_TIMEOUT,
-            )
-            data = resp.json()
-            name = data.get("name", "")
-            return name or ""
-        except Exception as e:
-            logger.warning(f"Не удалось получить имя баннера {banner_id}: {e}")
-            return ""
+        for attempt in range(1, 4):
+            try:
+                time.sleep(0.4)
+                resp = req_with_retry(
+                    "GET",
+                    url,
+                    headers=self.headers,
+                    params={"fields": "name"},
+                    timeout=STATS_TIMEOUT,
+                )
+                if resp.status_code == 429:
+                    logger.warning(f"⚠️ Rate limit при запросе name баннера {banner_id}, попытка {attempt}")
+                    time.sleep(1.5 * attempt)
+                    continue
+                
+                data = resp.json()
+                name = data.get("name", "")
+                return name or ""
+            except Exception as e:
+                logger.warning(f"Не удалось получить имя баннера {banner_id}: {e}")
+                time.sleep(1.0 * attempt)
+        return ""
 
     
     # --- Отключение объявления (статус blocked) ---
@@ -442,11 +462,16 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             try:
                 dt_cutoff = dt.datetime.strptime(acc.banner_date_create, "%d.%m.%Y")
                 created_at = api.get_banner_created(bid)
-                if created_at and created_at.date() < dt_cutoff.date():
+                if not created_at:
+                    logger.warning(f"⚠️ Не удалось получить дату создания баннера {bid} — пропускаем на всякий случай")
+                    continue
+                if created_at.date() < dt_cutoff.date():
                     logger.info(f"▶ Пропускаем баннер {bid}: создан {created_at.date()}, до {dt_cutoff.date()}")
                     continue
             except Exception as e:
                 logger.warning(f"Ошибка проверки даты создания баннера {bid}: {e}")
+                continue
+
 
         spent_all_time = sum_map.get(bid, {}).get("spent_all_time", 0.0)
         period = period_map.get(bid, {})
