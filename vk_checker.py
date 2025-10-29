@@ -480,16 +480,16 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
     api = VkAdsApi(token=acc.token)
 
+    if acc.allowed_campaigns:
+        for camp_id in acc.allowed_campaigns:
+            api.add_banners_from_allowed_campaign(camp_id, acc.allowed_banners)
+        logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
+        
     # --- Если есть исключённые кампании, расширяем список исключённых баннеров ---
     if acc.exceptions_campaigns:
         for camp_id in acc.exceptions_campaigns:
             api.add_banners_from_campaign_to_exceptions(camp_id, acc.exceptions_banners)
         logger.info(f"Итоговый список исключённых баннеров: {len(acc.exceptions_banners)}")
-
-    if acc.allowed_campaigns:
-        for camp_id in acc.allowed_campaigns:
-            api.add_banners_from_allowed_campaign(camp_id, acc.allowed_banners)
-        logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
         
     # 1) Список активных объявлений
     banners = api.list_active_banners()
@@ -547,7 +547,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             continue
             
         logger.info(
-                f"[BANNER {bid} | GROUP {agid}]: spent = {spent:.2f}, cpc = {cpc:.2f}, vk.cpa = {vk_cpa:.2f} [sat = {spent_all_time:.2f}]"
+                f"[BANNER {bid} | GROUP {agid}]:spent = {spent:.2f},cpc = {cpc:.2f},cpa = {vk_cpa:.2f}"
         )
 
         # Если объявление уже потратило больше порога — не трогаем
