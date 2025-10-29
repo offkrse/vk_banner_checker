@@ -22,6 +22,9 @@ STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
+MAX_DISABLES_PER_RUN = 10  # максимум баннеров, которые можно отключить за один запуск
+
+DRY_RUN = True  #True для тестов, False для рабочего
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
@@ -153,14 +156,24 @@ def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[
     for attempt in range(1, RETRY_COUNT + 1):
         try:
             resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
+            
+            # 💡 Если VK API вернул лимит
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", "3"))
+                logger.warning(f"⚠️ VK API rate limit (429). Пауза {retry_after}s перед повтором...")
+                time.sleep(retry_after)
+                continue
+            
             if resp.status_code >= 500:
                 raise requests.HTTPError(f"{resp.status_code} {resp.text}")
             return resp
+        
         except Exception as e:
             last_exc = e
             sleep_for = RETRY_BACKOFF ** (attempt - 1)
             logger.warning(f"{method} {url} попытка {attempt}/{RETRY_COUNT} не удалась: {e}. Повтор через {sleep_for:.1f}s")
             time.sleep(sleep_for)
+    
     assert last_exc is not None
     raise last_exc
 
@@ -442,7 +455,10 @@ class VkAdsApi:
     
     # --- Отключение объявления (статус blocked) ---
     def disable_banner(self, banner_id: int) -> bool:
-        
+        if DRY_RUN:
+            logger.warning(f"🧪 [DRY RUN] Баннер {banner_id} НЕ отключен (тестовый режим)")
+            return True
+            
         # Отключает объявление (меняет статус на blocked)
         # POST /api/v2/banners/<banner_id>.json
         
@@ -479,6 +495,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info("=" * 80)
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
     api = VkAdsApi(token=acc.token)
+    disabled_count = 0
+    disabled_ids = []  # список для хранения отключённых баннеров
 
     if acc.allowed_campaigns:
         for camp_id in acc.allowed_campaigns:
@@ -562,6 +580,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         if not bad:
             logger.info("✔ Прошёл фильтр — ОК")
             continue
+            
+        if disabled_count >= MAX_DISABLES_PER_RUN:
+            logger.warning("🚨 Достигнут лимит отключений за запуск — дальнейшие баннеры не будут отключаться")
+            break
 
         # Отключаем объяву
         logger.warning(f"✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
@@ -569,6 +591,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
         logger.warning(f"⇒ {status_msg}")
 
+        if disabled:
+            disabled_count += 1
+            disabled_ids.append(bid)
+            
         # Уведомление в TG
         reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
         date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
@@ -585,6 +611,25 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             f"    - Цена результата = {vk_cpa:.2f}"
         )
         tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
+
+        if disabled_ids:
+            # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
+            backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
+            try:
+                # Если файл уже существует, подгружаем старые ID и дописываем
+                if backup_path.exists():
+                    with open(backup_path, "r", encoding="utf-8") as f:
+                        old_data = json.load(f)
+                        if isinstance(old_data, list):
+                            disabled_ids = list(set(old_data + disabled_ids))
+        
+                with open(backup_path, "w", encoding="utf-8") as f:
+                    json.dump(disabled_ids, f, ensure_ascii=False, indent=2)
+        
+                logger.info(f"💾 Сохранены ID отключённых баннеров: {backup_path} (всего {len(disabled_ids)})")
+            except Exception as e:
+                logger.error(f"Ошибка сохранения списка отключённых баннеров: {e}")
+
 
 
 # ==========================
