@@ -100,6 +100,18 @@ ACCOUNTS: List[AccountConfig] = [
         exceptions_campaigns=[],
         exceptions_banners=[],
     ),
+    AccountConfig(
+        name="RUSTORE",
+        token_env="VK_TOKEN_ZEL_1",
+        chat_id_env="TG_CHAT_ID_ZELENOV",
+        n_days=2,
+        flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=26, min_spent_for_cpa=200, cpa_bad_value=105),
+        banner_date_create=None,
+        allowed_campaigns=[],
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    )
     # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
     #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ]
