@@ -41,18 +41,24 @@ class BaseFilter:
     cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
-        cond1 = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
-        cond2 = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
+        cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
+        cond_cpa_bad = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
         reason = []
-        if cond1:
-            reason.append(
-                f"spent≥{self.min_spent_for_cpc} & (cpc==0 or cpc≥{self.cpc_bad_value}) => (spent={spent:.2f}, cpc={cpc:.2f})"
-            )
-        if cond2:
-            reason.append(
-                f"spent≥{self.min_spent_for_cpa} & (vk.cpa==0 or vk.cpa≥{self.cpa_bad_value}) => (spent={spent:.2f}, vk.cpa={vk_cpa:.2f})"
-            )
-        return (cond1 and cond2, "; ".join(reason) if reason else "")
+        # Приоритет логики:
+        # 1️⃣ Если CPA хороший — всегда оставляем
+        if not cond_cpa_bad:
+            return False, f"CPA хороший ({vk_cpa:.2f} < {self.cpa_bad_value}) — не трогаем"
+
+        # 2️⃣ Если CPA плохой, но CPC хороший — тоже оставляем
+        if cond_cpa_bad and not cond_cpc_bad:
+            return False, f"CPC норм ({cpc:.2f} < {self.cpc_bad_value}), хотя CPA плохой ({vk_cpa:.2f}) — оставляем"
+
+        # 3️⃣ Если и CPA, и CPC плохие — отключаем
+        if cond_cpa_bad and cond_cpc_bad:
+            return True, f"Обе метрики плохие (CPC={cpc:.2f} ≥ {self.cpc_bad_value}, CPA={vk_cpa:.2f} ≥ {self.cpa_bad_value})"
+
+        # 4️⃣ Всё остальное — норм
+        return False, "Все метрики в норме"
 
 # Описание кабинета
 @dataclass
@@ -144,17 +150,17 @@ def load_env() -> None:
     if not load_dotenv():
         logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
 
-def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
-    """Возвращает простую текстовую причину"""
-    cond_cpc = (spent >= flt.min_spent_for_cpc) and (cpc == 0 or cpc >= flt.cpc_bad_value)
-    cond_cpa = (spent >= flt.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= flt.cpa_bad_value)
-    if cond_cpc and cond_cpa:
-        return "Дорогая цена клика и результата"
-    elif cond_cpc:
-        return "Дорогая цена клика"
-    elif cond_cpa:
-        return "Дорогой результат"
-    return "—"
+#def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
+#    """Возвращает простую текстовую причину"""
+#    cond_cpc = (spent >= flt.min_spent_for_cpc) and (cpc == 0 or cpc >= flt.cpc_bad_value)
+#    cond_cpa = (spent >= flt.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= flt.cpa_bad_value)
+#    if cond_cpc and cond_cpa:
+#        return "Дорогая цена клика и результата"
+#    elif cond_cpc:
+#        return "Дорогая цена клика"
+#    elif cond_cpa:
+#        return "Дорогой результат"
+#    return "—"
     
 
 def fmt_date(d: str) -> str:
@@ -625,11 +631,10 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             disabled_ids.append(bid)
           
             # --- Копим уведомление ---
-            reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
+            #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
             banner_name = api.get_banner_name(bid) or "Без названия"
             notifications.append(
                 f"<b>{banner_name}</b> #{bid}\n"
-                f"    ⤷ {reason_short}\n"
                 f"    ⤷ Потрачено = {spent:.2f} ₽\n"
                 f"    ⤷ Цена результата = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
             )
