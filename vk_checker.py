@@ -89,32 +89,32 @@ class AccountConfig:
 
 # Список ваших кабинетов (добавьте/измените по аналогии)
 ACCOUNTS: List[AccountConfig] = [
-    AccountConfig(
-        name="MAIN",
-        token_env="VK_TOKEN_MAIN",
-        chat_id_env="TG_CHAT_ID_MAIN",
-        n_days=2,
-        n_all_time=True,
-        flt=BaseFilter(),  # можно переопределять пороги per-account
-        banner_date_create=None,
-        allowed_campaigns=[],
-        allowed_banners=[],
-        exceptions_campaigns=[],
-        exceptions_banners=[],
-    ),
     #AccountConfig(
-    #    name="ОСНОВНОЙ",
-    #    token_env="VK_TOKEN_ZEL_1",
+    #    name="MAIN",
+    #    token_env="VK_TOKEN_MAIN",
     #    chat_id_env="TG_CHAT_ID_MAIN",
     #    n_days=2,
     #    n_all_time=True,
-    #    flt=BaseFilter(min_spent_for_cpc=170, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
+    #    flt=BaseFilter(),  # можно переопределять пороги per-account
     #    banner_date_create=None,
-    #    allowed_campaigns=[14739714,14739769,14739806,14740194,14740269,14741230,14741258,14741283,14741312,14741807,14741832,14741866,14741875,14741894,14741928,14741945,14741967,14741995],
+    #    allowed_campaigns=[],
     #    allowed_banners=[],
     #    exceptions_campaigns=[],
     #    exceptions_banners=[],
-    #)
+    #),
+    AccountConfig(
+        name="ОСНОВНОЙ",
+        token_env="VK_TOKEN_ZEL_1",
+        chat_id_env="TG_CHAT_ID_MAIN",
+        n_days=2,
+        n_all_time=True,
+        flt=BaseFilter(min_spent_for_cpc=170, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
+        banner_date_create=None,
+        allowed_campaigns=[14739714,14739769,14739806,14740194,14740269,14741230,14741258,14741283,14741312,14741807,14741832,14741866,14741875,14741894,14741928,14741945,14741967,14741995],
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    )
     # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
     #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ]
