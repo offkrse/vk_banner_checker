@@ -51,7 +51,7 @@ class BaseFilter:
 
         # 2️⃣ Если CPA плохой, но CPC хороший — тоже оставляем
         if cond_cpa_bad and not cond_cpc_bad:
-            return False, f"CPC норм ({cpc:.2f} < {self.cpc_bad_value}), хотя CPA плохой ({vk_cpa:.2f}) — оставляем"
+            return True, f"CPC норм ({cpc:.2f} < {self.cpc_bad_value}), хотя CPA плохой ({vk_cpa:.2f})"
 
         # 3️⃣ Если и CPA, и CPC плохие — отключаем
         if cond_cpa_bad and cond_cpc_bad:
