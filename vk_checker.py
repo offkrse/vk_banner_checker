@@ -650,29 +650,27 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         #)
         #tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
   
-        # --- Отправка ---
-        if notifications:
-            combined_text = f"<b>[{acc.name}]</b>\n<b>Отключены баннеры:</b>\n\n" + "\n\n".join(notifications)
-            tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=combined_text)
-            logger.info(f"Отправлено итоговое сообщение в TG с {len(notifications)} баннерами")
+    # --- Отправка ---
+    if notifications:
+        combined_text = f"<b>[{acc.name}]</b>\n<b>Отключены баннеры:</b>\n\n" + "\n\n".join(notifications)
+        tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=combined_text)
+        logger.info(f"Отправлено итоговое сообщение в TG с {len(notifications)} баннерами")
           
-        if disabled_ids:
-            # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
-            backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
-            try:
-                # Если файл уже существует, подгружаем старые ID и дописываем
-                if backup_path.exists():
-                    with open(backup_path, "r", encoding="utf-8") as f:
-                        old_data = json.load(f)
-                        if isinstance(old_data, list):
-                            disabled_ids = list(set(old_data + disabled_ids))
-        
-                with open(backup_path, "w", encoding="utf-8") as f:
-                    json.dump(disabled_ids, f, ensure_ascii=False, indent=2)
-        
-                logger.info(f"💾 Сохранены ID отключённых баннеров: {backup_path} (всего {len(disabled_ids)})")
-            except Exception as e:
-                logger.error(f"Ошибка сохранения списка отключённых баннеров: {e}")
+    if disabled_ids:
+        # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
+        backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
+        try:
+            # Если файл уже существует, подгружаем старые ID и дописываем
+            if backup_path.exists():
+                with open(backup_path, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+                    if isinstance(old_data, list):
+                        disabled_ids = list(set(old_data + disabled_ids))
+            with open(backup_path, "w", encoding="utf-8") as f:
+                json.dump(disabled_ids, f, ensure_ascii=False, indent=2)
+            logger.info(f"💾 Сохранены ID отключённых баннеров: {backup_path} (всего {len(disabled_ids)})")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения списка отключённых баннеров: {e}")
 
 
 
