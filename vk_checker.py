@@ -52,7 +52,7 @@ class BaseFilter:
             reason.append(
                 f"spent≥{self.min_spent_for_cpa} & (vk.cpa==0 or vk.cpa≥{self.cpa_bad_value}) => (spent={spent:.2f}, vk.cpa={vk_cpa:.2f})"
             )
-        return (cond1 or cond2, "; ".join(reason) if reason else "")
+        return (cond1 and cond2, "; ".join(reason) if reason else "")
 
 # Описание кабинета
 @dataclass
