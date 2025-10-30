@@ -111,7 +111,7 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         name="ОСНОВНОЙ",
         token_env="VK_TOKEN_ZEL_1",
-        chat_id_env="TG_CHAT_ID_MAIN",
+        chat_id_env="TG_CHAT_ID_ZELENOV",
         n_days=2,
         n_all_time=True,
         flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
