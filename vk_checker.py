@@ -102,7 +102,7 @@ ACCOUNTS: List[AccountConfig] = [
         chat_id_env="TG_CHAT_ID_MAIN",
         n_days=2,
         n_all_time=True,
-        flt=BaseFilter(),  # можно переопределять пороги per-account
+        flt=BaseFilter(min_spent_for_cpc=120, cpc_bad_value=100, min_spent_for_cpa=201, cpa_bad_value=200),  # можно переопределять пороги per-account
         banner_date_create=None,
         allowed_campaigns=load_campaigns("data/main_allowed_campaigns.txt"),
         allowed_banners=[],
