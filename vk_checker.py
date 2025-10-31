@@ -32,6 +32,23 @@ N_DAYS_DEFAULT = 2  # Можно переопределить отдельно �
 # Порог "не трогать, если уже потратили":
 SPENT_ALL_TIME_DONT_TOUCH_RUB = 2000
 
+# ==========================
+# Логирование
+# ==========================
+LOG_DIR = pathlib.Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+log_file = LOG_DIR / "vk_checker.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("vk_ads_auto")
+
 # Базовый фильтр согласно ТЗ
 @dataclass
 class BaseFilter:
@@ -163,22 +180,6 @@ ACCOUNTS: List[AccountConfig] = [
     
 ]
 
-# ==========================
-# Логирование
-# ==========================
-LOG_DIR = pathlib.Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-log_file = LOG_DIR / "vk_checker.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_file, encoding="utf-8"),
-    ],
-)
-logger = logging.getLogger("vk_ads_auto")
 
 # ==========================
 # Вспомогательные функции
