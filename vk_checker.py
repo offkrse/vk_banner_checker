@@ -93,36 +93,49 @@ class AccountConfig:
         return c
 
 
-# Список ваших кабинетов (добавьте/измените по аналогии)
+# AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
+#flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ACCOUNTS: List[AccountConfig] = [
+    AccountConfig(
+        name="MAIN",
+        token_env="VK_TOKEN_MAIN",
+        chat_id_env="TG_CHAT_ID_MAIN",
+        n_days=2,
+        n_all_time=True,
+        flt=BaseFilter(),  # можно переопределять пороги per-account
+        banner_date_create=None,
+        allowed_campaigns=load_campaigns("data/main_allowed_campaigns.txt"),
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
     #AccountConfig(
-    #    name="MAIN",
-    #    token_env="VK_TOKEN_MAIN",
-    #    chat_id_env="TG_CHAT_ID_MAIN",
+    #    name="ОСНОВНОЙ",
+    #    token_env="VK_TOKEN_ZEL_1",
+    #    chat_id_env="TG_CHAT_ID_ZELENOV",
     #    n_days=2,
     #    n_all_time=True,
-    #    flt=BaseFilter(),  # можно переопределять пороги per-account
+    #    flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
     #    banner_date_create=None,
-    #    allowed_campaigns=[],
+    #    allowed_campaigns=load_campaigns("data/zelenov_main_allowed_campaigns.txt"),
     #    allowed_banners=[],
     #    exceptions_campaigns=[],
     #    exceptions_banners=[],
     #),
-    AccountConfig(
-        name="ОСНОВНОЙ",
-        token_env="VK_TOKEN_ZEL_1",
-        chat_id_env="TG_CHAT_ID_ZELENOV",
-        n_days=2,
-        n_all_time=True,
-        flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
-        banner_date_create=None,
-        allowed_campaigns=[14739714,14739769,14739806,14740194,14740269,14741230,14741258,14741283,14741312,14741807,14741832,14741866,14741875,14741894,14741928,14741945,14741967,14741995,14755275,14755623,14755647,14755690,14755714,14755857,14755943,14756012,14756069,14756112,14756338,14756385,14756412,14757209,14757255,14757365,14757409,14757457,14757523,14757553,14757583,14757629,14776296,14776420,14776501,14776523,14776563,14776589,14776663,14776822,14776863,14776887,14776914,14776941],
-        allowed_banners=[],
-        exceptions_campaigns=[],
-        exceptions_banners=[],
-    )
-    # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
-    #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
+    #AccountConfig(
+    #    name="Вадим-Зеленов ТМ1-5919",
+    #    token_env="VK_TOKEN_ZEL_2",
+    #    chat_id_env="TG_CHAT_ID_ZELENOV",
+    #    n_days=2,
+    #    n_all_time=True,
+    #    flt=BaseFilter(min_spent_for_cpc=30, cpc_bad_value=25, min_spent_for_cpa=120, cpa_bad_value=100),
+    #    banner_date_create=None,
+    #    allowed_campaigns=load_campaigns("data/zelenov_2_allowed_campaigns.txt"),
+    #    allowed_banners=[],
+    #    exceptions_campaigns=[],
+    #    exceptions_banners=[],
+    #),
+    
 ]
 
 # ==========================
@@ -149,6 +162,23 @@ logger = logging.getLogger("vk_ads_auto")
 def load_env() -> None:
     if not load_dotenv():
         logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
+
+def load_campaigns(path: str) -> list[int]:
+    campaigns = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip().strip(",")  # убираем пробелы и запятые
+                if not line or line.startswith("#"):  # игнорируем пустые строки и комментарии
+                    continue
+                if line.isdigit():
+                    campaigns.append(int(line))
+                else:
+                    # можно добавить предупреждение, если встретилось что-то странное
+                    print(f"⚠️ Некорректная строка в {path}: {line}")
+    except FileNotFoundError:
+        print(f"⚠️ Файл {path} не найден — список кампаний пуст")
+    return campaigns
 
 #def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
 #    """Возвращает простую текстовую причину"""
