@@ -60,6 +60,24 @@ class BaseFilter:
         # 4️⃣ Всё остальное — норм
         return False, "Все метрики в норме"
 
+#Загрузка из списка
+def load_campaigns(path: str) -> list[int]:
+    campaigns = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip().strip(",")  # убираем пробелы и запятые
+                if not line or line.startswith("#"):  # игнорируем пустые строки и комментарии
+                    continue
+                if line.isdigit():
+                    campaigns.append(int(line))
+                else:
+                    # можно добавить предупреждение, если встретилось что-то странное
+                    print(f"⚠️ Некорректная строка в {path}: {line}")
+    except FileNotFoundError:
+        print(f"⚠️ Файл {path} не найден — список кампаний пуст")
+    return campaigns
+    
 # Описание кабинета
 @dataclass
 class AccountConfig:
@@ -162,23 +180,6 @@ logger = logging.getLogger("vk_ads_auto")
 def load_env() -> None:
     if not load_dotenv():
         logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
-
-def load_campaigns(path: str) -> list[int]:
-    campaigns = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip().strip(",")  # убираем пробелы и запятые
-                if not line or line.startswith("#"):  # игнорируем пустые строки и комментарии
-                    continue
-                if line.isdigit():
-                    campaigns.append(int(line))
-                else:
-                    # можно добавить предупреждение, если встретилось что-то странное
-                    print(f"⚠️ Некорректная строка в {path}: {line}")
-    except FileNotFoundError:
-        print(f"⚠️ Файл {path} не найден — список кампаний пуст")
-    return campaigns
 
 #def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
 #    """Возвращает простую текстовую причину"""
