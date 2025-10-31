@@ -72,11 +72,18 @@ def load_campaigns(path: str) -> list[int]:
                 if line.isdigit():
                     campaigns.append(int(line))
                 else:
-                    # можно добавить предупреждение, если встретилось что-то странное
-                    print(f"⚠️ Некорректная строка в {path}: {line}")
+                    logger.warning(f"⚠️ Некорректная строка в {path}: {line}")
     except FileNotFoundError:
-        print(f"⚠️ Файл {path} не найден — список кампаний пуст")
-    return campaigns
+        logger.warning(f"⚠️ Файл {path} не найден — список кампаний пуст - [0]")
+        return [0]
+
+    if not campaigns:
+        logger.warning(f"⚠️ В файле {path} нет кампаний — возвращаем [0]")
+        return [0]
+    else:
+        logger.info(f"✅ Загружено {len(campaigns)} кампаний из {path}")
+        return campaigns
+
     
 # Описание кабинета
 @dataclass
@@ -546,6 +553,12 @@ def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
 def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info("=" * 80)
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
+    
+    # 💡 Проверка: если список содержит только [0] — пропускаем
+    if acc.allowed_campaigns == [0]:
+        logger.warning(f"⚠️ Пропуск кабинета {acc.name}: файл кампаний пуст или не найден")
+        return
+        
     api = VkAdsApi(token=acc.token)
     disabled_count = 0
     disabled_ids = []  # список для хранения отключённых баннеров
