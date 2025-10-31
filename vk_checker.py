@@ -22,7 +22,7 @@ STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
-MAX_DISABLES_PER_RUN = 10  # максимум баннеров, которые можно отключить за один запуск
+MAX_DISABLES_PER_RUN = 12  # максимум баннеров, которые можно отключить за один запуск
 
 DRY_RUN = False  #True для тестов, False для рабочего
 
@@ -62,19 +62,15 @@ class BaseFilter:
         cond_cpa_bad = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
         reason = []
         # Приоритет логики:
-        # 1️⃣ Если CPA хороший — всегда оставляем
-        if not cond_cpa_bad:
-            return False, f"CPA хороший ({vk_cpa:.2f} < {self.cpa_bad_value}) — не трогаем"
+        # 1️⃣ Если CPA плохой
+        if cond_cpa_bad:
+            return True, f"CPA плохой ({vk_cpa:.2f} < {self.cpa_bad_value})"
 
         # 2️⃣ Если CPC плохой, а CPA ещё не достиг минимального spent — тоже отключаем
         if cond_cpc_bad and spent < self.min_spent_for_cpa:
             return True, f"CPC плохой ({cpc:.2f} ≥ {self.cpc_bad_value}), а CPA ещё не достиг порога"
 
-        # 3️⃣ Если и CPA, и CPC плохие — отключаем
-        if cond_cpa_bad and cond_cpc_bad:
-            return True, f"Обе метрики плохие (CPC={cpc:.2f} ≥ {self.cpc_bad_value}, CPA={vk_cpa:.2f} ≥ {self.cpa_bad_value})"
-
-        # 4️⃣ Всё остальное — норм
+        # 4️ Всё остальное — норм
         return False, "Все метрики в норме"
 
 #Загрузка из списка
