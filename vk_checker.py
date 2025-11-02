@@ -528,7 +528,7 @@ class VkAdsApi:
                 timeout=WRITE_TIMEOUT,
             )
             if resp.status_code == 204:
-                logger.info(f"Баннер {banner_id} успешно отключен (HTTP 204)")
+                logger.warning(f"⤷ Баннер успешно отключен (HTTP 204)")
                 return True
             logger.warning(f"Не удалось отключить баннер {banner_id}: {resp.status_code} {resp.text}")
             return False
@@ -665,7 +665,6 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         logger.warning(f"✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
         disabled = api.disable_banner(bid)
         status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
-        logger.warning(f"⇒ {status_msg}")
 
         if disabled:
             disabled_count += 1
