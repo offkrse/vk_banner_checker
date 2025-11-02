@@ -4,7 +4,7 @@
 import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from dotenv import load_dotenv
 
@@ -12,44 +12,50 @@ from dotenv import load_dotenv
 load_dotenv("/opt/vk_checker/.env")
 
 BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-DOMAIN = "https://own-zone.ru"  # твой домен (где работает FastAPI mini app)
+DOMAIN = "https://own-zone.ru"  # домен, где крутится твой FastAPI
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ В .env отсутствует TG_BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()  # <-- создаём Dispatcher до использования декораторов
+dp = Dispatcher()  # создаём до использования декораторов
 
 
 # === Команда /start ===
 @dp.message(CommandStart())
 async def start_cmd(msg: types.Message):
     """
-    Отправляет пользователю кнопку для открытия мини-приложения VK Checker.
+    Отправляет кнопку для открытия мини-приложения VK Checker.
     """
-    link = f"{DOMAIN}/"  # мини-приложение открывается в Telegram WebView
+    link = f"{DOMAIN}/"
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Открыть VK Checker",
-                    web_app=WebAppInfo(url=link)  # открывает WebApp внутри Telegram
+                    text="📊 Открыть VK Checker",
+                    web_app=WebAppInfo(url=link)
                 )
             ]
         ]
     )
 
+    await msg.answer(
+        f"👋 Привет, {msg.from_user.first_name or 'пользователь'}!\n\n"
+        "Это твой личный кабинет VK Checker.\n"
+        "Нажми кнопку ниже, чтобы открыть панель управления 👇",
+        reply_markup=kb
+    )
 
 
 # === Команда /help ===
-@dp.message(CommandStart(commands=["help"]))
+@dp.message(Command("help"))
 async def help_cmd(msg: types.Message):
     await msg.answer(
         "🧭 Команды:\n"
         "/start — открыть VK Checker\n"
         "/help — справка\n\n"
-        "Открой WebApp прямо в Telegram для управления кабинетами."
+        "Открой мини-приложение прямо в Telegram для управления кабинетами."
     )
 
 
