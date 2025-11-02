@@ -4,7 +4,7 @@
 import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer
 
@@ -22,10 +22,12 @@ serializer = URLSafeTimedSerializer(SECRET_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === Генерация ссылки на mini app ===
+
+# === Генерация ссылки на Mini App ===
 def get_webapp_link(telegram_id: int) -> str:
     token = serializer.dumps({"telegram_id": telegram_id})
     return f"{DOMAIN}/auth?token={token}"
+
 
 # === Команда /start ===
 @dp.message(CommandStart())
@@ -48,8 +50,9 @@ async def start_cmd(msg: types.Message):
 
     await msg.answer(text, reply_markup=kb)
 
+
 # === Команда /help ===
-@dp.message(commands=["help"])
+@dp.message(Command("help"))
 async def help_cmd(msg: types.Message):
     await msg.answer(
         "🧭 Команды:\n"
@@ -58,10 +61,12 @@ async def help_cmd(msg: types.Message):
         "Открой WebApp, чтобы управлять кабинетами."
     )
 
+
 # === Точка входа ===
 async def main():
     print("🚀 Telegram бот VK Checker запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     try:
