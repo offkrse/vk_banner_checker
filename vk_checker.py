@@ -66,6 +66,9 @@ class BaseFilter:
         if cond_cpa_bad:
             return True, f"CPA плохой ({vk_cpa:.2f} < {self.cpa_bad_value})"
 
+        if not cond_cpa_bad:
+            return False, f"CPA хороший"
+            
         # 2️⃣ Если CPC плохой, а CPA ещё не достиг минимального spent — тоже отключаем
         if cond_cpc_bad and spent < self.min_spent_for_cpa:
             return True, f"CPC плохой ({cpc:.2f} ≥ {self.cpc_bad_value}), а CPA ещё не достиг порога"
