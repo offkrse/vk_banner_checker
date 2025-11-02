@@ -27,7 +27,7 @@ async def start_cmd(msg: types.Message):
     """
     Отправляет кнопку для открытия мини-приложения VK Checker.
     """
-    link = f"{DOMAIN}/"
+    link = f"{DOMAIN}/dashboard"
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -38,13 +38,6 @@ async def start_cmd(msg: types.Message):
                 )
             ]
         ]
-    )
-
-    await msg.answer(
-        f"👋 Привет, {msg.from_user.first_name or 'пользователь'}!\n\n"
-        "Это твой личный кабинет VK Checker.\n"
-        "Нажми кнопку ниже, чтобы открыть панель управления 👇",
-        reply_markup=kb
     )
 
 
