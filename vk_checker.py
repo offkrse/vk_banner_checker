@@ -17,12 +17,13 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
+Version = 1.9
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
-MAX_DISABLES_PER_RUN = 30  # максимум баннеров, которые можно отключить за один запуск
+MAX_DISABLES_PER_RUN = 25  # максимум баннеров, которые можно отключить за один запуск
 
 DRY_RUN = False  #True для тестов, False для рабочего
 
