@@ -681,6 +681,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         spent = float(period.get("spent", 0.0))
         cpc = float(period.get("cpc", 0.0))
         vk_cpa = float(period.get("vk.cpa", 0.0))
+        income_all = float(income_total.get(str(bid), 0.0)) if income_total else 0.0
 
         # --- Исключения ---
         if bid in acc.exceptions_banners:
@@ -725,8 +726,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             banner_name = api.get_banner_name(bid) or "Без названия"
             notifications.append(
                 f"<b>{banner_name}</b> #{bid}\n"
-                f"    ⤷ Потрачено = {spent:.2f} ₽\n"
-                f"    ⤷ Цена результата = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
+                f"    ⤷ Потрачено = {spent:.2f} ₽ | Доход = {income_all:.2f} ₽\n "
+                f"    ⤷ Результат = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
             )
         # Уведомление в TG
         #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
