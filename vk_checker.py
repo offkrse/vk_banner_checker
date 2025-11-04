@@ -726,7 +726,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             banner_name = api.get_banner_name(bid) or "Без названия"
             notifications.append(
                 f"<b>{banner_name}</b> #{bid}\n"
-                f"    ⤷ Потрачено = {spent:.2f} ₽ | Доход = {income_all:.2f} ₽\n "
+                f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = {income_all:.2f} ₽\n "
                 f"    ⤷ Результат = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
             )
         # Уведомление в TG
