@@ -667,15 +667,21 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         # --- Проверка дохода: если баннер не убыточен, пропускаем остальные фильтры
         if income_total:
             income_all = float(income_total.get(str(bid), 0.0))
-            diff = spent_all_time - income_all
 
-            # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
-            if diff <= acc.flt.max_loss_rub:
-                logger.info(
-                    f"▶ Пропускаем баннер {bid}: доход {income_all:.2f}, потрачено {spent_all_time:.2f}, "
-                    f"разница {diff:.2f} ≤ {acc.flt.max_loss_rub} (прибыльный)"
-                )
-                continue
+            # Если доход = 0 — считаем, что данных нет, пропускаем проверку дохода
+            if income_all <= 0:
+                logger.info(f"💡 Баннер {bid}: доход = 0 — проверяем дальше по обычным фильтрам")
+            else:
+                diff = spent_all_time - income_all
+
+                # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
+                if diff <= acc.flt.max_loss_rub:
+                    logger.info(
+                        f"▶ Пропускаем баннер {bid}: доход {income_all:.2f}, потрачено {spent_all_time:.2f}, "
+                        f"разница {diff:.2f} ≤ {acc.flt.max_loss_rub} (прибыльный)"
+                    )
+                    continue
+
 
         period = period_map.get(bid, {})
         spent = float(period.get("spent", 0.0))
