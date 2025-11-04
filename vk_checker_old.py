@@ -17,20 +17,38 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
+Version = 1.9
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
-MAX_DISABLES_PER_RUN = 10  # максимум баннеров, которые можно отключить за один запуск
+MAX_DISABLES_PER_RUN = 25  # максимум баннеров, которые можно отключить за один запуск
 
-DRY_RUN = True  #True для тестов, False для рабочего
+DRY_RUN = False  #True для тестов, False для рабочего
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
 
 # Порог "не трогать, если уже потратили":
 SPENT_ALL_TIME_DONT_TOUCH_RUB = 2000
+
+# ==========================
+# Логирование
+# ==========================
+LOG_DIR = pathlib.Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+log_file = LOG_DIR / "vk_checker.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("vk_ads_auto")
 
 # Базовый фильтр согласно ТЗ
 @dataclass
@@ -41,19 +59,46 @@ class BaseFilter:
     cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
-        cond1 = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
-        cond2 = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
+        cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
+        cond_cpa_bad = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
         reason = []
-        if cond1:
-            reason.append(
-                f"spent≥{self.min_spent_for_cpc} & (cpc==0 or cpc≥{self.cpc_bad_value}) => (spent={spent:.2f}, cpc={cpc:.2f})"
-            )
-        if cond2:
-            reason.append(
-                f"spent≥{self.min_spent_for_cpa} & (vk.cpa==0 or vk.cpa≥{self.cpa_bad_value}) => (spent={spent:.2f}, vk.cpa={vk_cpa:.2f})"
-            )
-        return (cond1 or cond2, "; ".join(reason) if reason else "")
+        # Приоритет логики:
+        # 1️⃣ Если CPA плохой
+        if cond_cpa_bad:
+            return True, f"CPA плохой ({vk_cpa:.2f} < {self.cpa_bad_value})"
+            
+        # 2️⃣ Если CPC плохой, а CPA ещё не достиг минимального spent — тоже отключаем
+        if cond_cpc_bad and spent < self.min_spent_for_cpa and vk_cpa == 0:
+            return True, f"CPC плохой ({cpc:.2f} ≥ {self.cpc_bad_value}), а CPA ещё не достиг порога"
 
+        # 4️ Всё остальное — норм
+        return False, "Все метрики в норме"
+
+#Загрузка из списка
+def load_campaigns(path: str) -> list[int]:
+    campaigns = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip().strip(",")  # убираем пробелы и запятые
+                if not line or line.startswith("#"):  # игнорируем пустые строки и комментарии
+                    continue
+                if line.isdigit():
+                    campaigns.append(int(line))
+                else:
+                    logger.warning(f"⚠️ Некорректная строка в {path}: {line}")
+    except FileNotFoundError:
+        logger.warning(f"⚠️ Файл {path} не найден — список кампаний пуст - [0]")
+        return [0]
+
+    if not campaigns:
+        logger.warning(f"⚠️ В файле {path} нет кампаний — возвращаем [0]")
+        return [0]
+    else:
+        logger.info(f"✅ Загружено {len(campaigns)} кампаний из {path}")
+        return campaigns
+
+    
 # Описание кабинета
 @dataclass
 class AccountConfig:
@@ -61,6 +106,7 @@ class AccountConfig:
     token_env: str
     chat_id_env: str
     n_days: int = N_DAYS_DEFAULT
+    n_all_time: bool = False
     flt: BaseFilter = field(default_factory=BaseFilter)
     # Разрешенные 
     allowed_campaigns: List[int] = field(default_factory=list)
@@ -86,52 +132,51 @@ class AccountConfig:
         return c
 
 
-# Список ваших кабинетов (добавьте/измените по аналогии)
+# AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
+#flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ACCOUNTS: List[AccountConfig] = [
+    #AccountConfig(
+    #    name="MAIN",
+    #    token_env="VK_TOKEN_MAIN",
+    #    chat_id_env="TG_CHAT_ID_MAIN",
+    #    n_days=2,
+    #    n_all_time=True,
+    #    flt=BaseFilter(min_spent_for_cpc=120, cpc_bad_value=100, min_spent_for_cpa=201, cpa_bad_value=200),  # можно переопределять пороги per-account
+    #    banner_date_create=None,
+    #    allowed_campaigns=load_campaigns("data/main_allowed_campaigns.txt"),
+    #    allowed_banners=[],
+    #    exceptions_campaigns=[],
+    #    exceptions_banners=[],
+    #),
     AccountConfig(
-        name="MAIN",
-        token_env="VK_TOKEN_MAIN",
-        chat_id_env="TG_CHAT_ID_MAIN",
+        name="ОСНОВНОЙ",
+        token_env="VK_TOKEN_ZEL_1",
+        chat_id_env="TG_CHAT_ID_ZELENOV",
         n_days=2,
-        flt=BaseFilter(),  # можно переопределять пороги per-account
+        n_all_time=True,
+        flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
         banner_date_create=None,
-        allowed_campaigns=[],
+        allowed_campaigns=load_campaigns("data/zelenov_main_allowed_campaigns.txt"),
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
     ),
     AccountConfig(
-        name="ОСНОВНОЙ",
-        token_env="VK_TOKEN_ZEL_1",
-        chat_id_env="TG_CHAT_ID_MAIN",
+        name="Вадим-Зеленов ТМ1-5919",
+        token_env="VK_TOKEN_ZEL_2",
+        chat_id_env="TG_CHAT_ID_ZELENOV",
         n_days=2,
-        flt=BaseFilter(min_spent_for_cpc=170, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
+        n_all_time=True,
+        flt=BaseFilter(min_spent_for_cpc=30, cpc_bad_value=25, min_spent_for_cpa=120, cpa_bad_value=100),
         banner_date_create=None,
-        allowed_campaigns=[14739714,14739769,14739806,14740194,14740269,14741230,14741258,14741283,14741312,14741807,14741832,14741866,14741875,14741894,14741928,14741945,14741967,14741995],
+        #allowed_campaigns=load_campaigns("data/zelenov_2_allowed_campaigns.txt"),
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
-    )
-    # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
-    #               flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
+    ),
+    
 ]
 
-# ==========================
-# Логирование
-# ==========================
-LOG_DIR = pathlib.Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-log_file = LOG_DIR / "vk_checker.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_file, encoding="utf-8"),
-    ],
-)
-logger = logging.getLogger("vk_ads_auto")
 
 # ==========================
 # Вспомогательные функции
@@ -141,17 +186,17 @@ def load_env() -> None:
     if not load_dotenv():
         logger.warning(".env не найден или не загружен — убедитесь, что файл существует")
 
-def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
-    """Возвращает простую текстовую причину"""
-    cond_cpc = (spent >= flt.min_spent_for_cpc) and (cpc == 0 or cpc >= flt.cpc_bad_value)
-    cond_cpa = (spent >= flt.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= flt.cpa_bad_value)
-    if cond_cpc and cond_cpa:
-        return "Дорогая цена клика и результата"
-    elif cond_cpc:
-        return "Дорогая цена клика"
-    elif cond_cpa:
-        return "Дорогой результат"
-    return "—"
+#def short_reason(spent: float, cpc: float, vk_cpa: float, flt: BaseFilter) -> str:
+#    """Возвращает простую текстовую причину"""
+#    cond_cpc = (spent >= flt.min_spent_for_cpc) and (cpc == 0 or cpc >= flt.cpc_bad_value)
+#    cond_cpa = (spent >= flt.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= flt.cpa_bad_value)
+#    if cond_cpc and cond_cpa:
+#        return "Дорогая цена клика и результата"
+#    elif cond_cpc:
+#        return "Дорогая цена клика"
+#    elif cond_cpa:
+#        return "Дорогой результат"
+#    return "—"
     
 
 def fmt_date(d: str) -> str:
@@ -484,7 +529,7 @@ class VkAdsApi:
                 timeout=WRITE_TIMEOUT,
             )
             if resp.status_code == 204:
-                logger.info(f"Баннер {banner_id} успешно отключен (HTTP 204)")
+                logger.warning(f"⤷ Баннер успешно отключен (HTTP 204)")
                 return True
             logger.warning(f"Не удалось отключить баннер {banner_id}: {resp.status_code} {resp.text}")
             return False
@@ -506,9 +551,16 @@ def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
 def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info("=" * 80)
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
+    
+    # 💡 Проверка: если список содержит только [0] — пропускаем
+    if acc.allowed_campaigns == [0]:
+        logger.warning(f"⚠️ Пропуск кабинета {acc.name}: файл кампаний пуст или не найден")
+        return
+        
     api = VkAdsApi(token=acc.token)
     disabled_count = 0
     disabled_ids = []  # список для хранения отключённых баннеров
+    notifications = []
 
     if acc.allowed_campaigns:
         for camp_id in acc.allowed_campaigns:
@@ -529,12 +581,25 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     banner_ids = [int(b["id"]) for b in banners if "id" in b]
     logger.info(f"Всего активных объявлений: {len(banner_ids)}")
 
-    # 2) Стата за всё время
+    # 2) Статистика
     sum_map = api.stats_summary_banners(banner_ids)
+    
+    if acc.n_all_time:
+        logger.info(f"Используется режим n_all_time=True — фильтрация по полной статистике")
+        # Берем из summary данные
+        period_map = {
+            bid: {
+                "spent": d.get("spent_all_time", 0.0),
+                "cpc": d.get("cpc_all_time", 0.0),
+                "vk.cpa": d.get("vk.cpa_all_time", 0.0),
+            }
+            for bid, d in sum_map.items()
+        }
+        date_from, date_to = None, None
+    else:
+        date_from, date_to = daterange_for_last_n_days(acc.n_days)
+        period_map = api.stats_period_banners(banner_ids, date_from, date_to)
 
-    # 3) Стата за N дней
-    date_from, date_to = daterange_for_last_n_days(acc.n_days)
-    period_map = api.stats_period_banners(banner_ids, date_from, date_to)
 
     # 4) Пройтись по объявлениям и применить логику
     for b in banners:
@@ -601,46 +666,57 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         logger.warning(f"✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
         disabled = api.disable_banner(bid)
         status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
-        logger.warning(f"⇒ {status_msg}")
 
         if disabled:
             disabled_count += 1
             disabled_ids.append(bid)
-            
+          
+            # --- Копим уведомление ---
+            #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
+            banner_name = api.get_banner_name(bid) or "Без названия"
+            notifications.append(
+                f"<b>{banner_name}</b> #{bid}\n"
+                f"    ⤷ Потрачено = {spent:.2f} ₽\n"
+                f"    ⤷ Цена результата = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
+            )
         # Уведомление в TG
-        reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
-        date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
-        banner_name = api.get_banner_name(bid) or "Без названия"
-        text = (
-            f"<b>[{acc.name}]</b>\n"
-            f"<b>Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
-            f"Причина: {reason_short}\n\n"
-            f"<b>Статистика:</b>\n"
-            f"Потрачено за всё время = {spent_all_time:.2f} RUB\n"
-            f"За период с {date_from_fmt} по {date_to_fmt}:\n"
-            f"    - Потрачено = {spent:.2f}\n"
-            f"    - Цена клика = {cpc:.2f}\n"
-            f"    - Цена результата = {vk_cpa:.2f}"
-        )
-        tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
-
-        if disabled_ids:
-            # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
-            backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
-            try:
-                # Если файл уже существует, подгружаем старые ID и дописываем
-                if backup_path.exists():
-                    with open(backup_path, "r", encoding="utf-8") as f:
-                        old_data = json.load(f)
-                        if isinstance(old_data, list):
-                            disabled_ids = list(set(old_data + disabled_ids))
-        
-                with open(backup_path, "w", encoding="utf-8") as f:
-                    json.dump(disabled_ids, f, ensure_ascii=False, indent=2)
-        
-                logger.info(f"💾 Сохранены ID отключённых баннеров: {backup_path} (всего {len(disabled_ids)})")
-            except Exception as e:
-                logger.error(f"Ошибка сохранения списка отключённых баннеров: {e}")
+        #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
+        #date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
+        #banner_name = api.get_banner_name(bid) or "Без названия"
+        #text = (
+        #    f"<b>[{acc.name}]</b>\n"
+        #    f"<b>Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
+        #    f"Причина: {reason_short}\n\n"
+        #    f"<b>Статистика:</b>\n"
+        #    f"Потрачено за всё время = {spent_all_time:.2f} RUB\n"
+        #    f"За период с {date_from_fmt} по {date_to_fmt}:\n"
+        #    f"    - Потрачено = {spent:.2f}\n"
+        #    f"    - Цена клика = {cpc:.2f}\n"
+        #    f"    - Цена результата = {vk_cpa:.2f}"
+        #)
+        #tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
+  
+    # --- Отправка ---
+    if notifications:
+        combined_text = f"<b>[{acc.name}]</b>\n<b>Отключены баннеры:</b>\n\n" + "\n\n".join(notifications)
+        tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=combined_text)
+        logger.info(f"Отправлено итоговое сообщение в TG с {len(notifications)} баннерами")
+          
+    if disabled_ids:
+        # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
+        backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
+        try:
+            # Если файл уже существует, подгружаем старые ID и дописываем
+            if backup_path.exists():
+                with open(backup_path, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+                    if isinstance(old_data, list):
+                        disabled_ids = list(set(old_data + disabled_ids))
+            with open(backup_path, "w", encoding="utf-8") as f:
+                json.dump(disabled_ids, f, ensure_ascii=False, indent=2)
+            logger.info(f"💾 Сохранены ID отключённых баннеров: {backup_path} (всего {len(disabled_ids)})")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения списка отключённых баннеров: {e}")
 
 
 
