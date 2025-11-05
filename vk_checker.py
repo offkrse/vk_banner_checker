@@ -157,7 +157,7 @@ ACCOUNTS: List[AccountConfig] = [
         n_days=2,
         n_all_time=True,
         income_json_path="/opt/leads_postback/data/krolik.json",
-        flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
+        flt=BaseFilter(min_spent_for_cpc=101, cpc_bad_value=100, min_spent_for_cpa=301, cpa_bad_value=300),
         banner_date_create=None,
         allowed_campaigns=load_campaigns("data/zelenov_main_allowed_campaigns.txt"),
         allowed_banners=[],
