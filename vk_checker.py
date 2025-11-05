@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.1
+VersionVKChecker = 2.2
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -427,54 +427,76 @@ class VkAdsApi:
             logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в allowed: {e}")
 
 
-    def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
+    def add_banners_from_allowed_campaigns_bulk(self, campaign_ids: List[int], allowed_banners: List[int]) -> None:
         """
-        Добавляет в список исключений все активные баннеры из указанной кампании.
-        Делает два запроса:
-          1) /api/v2/ad_plans/<id>.json?fields=ad_groups — получает все группы
-          2) /api/v2/ad_groups/<group_id>.json?fields=banners — получает баннеры каждой группы
+        Добавляет в список разрешённых баннеров все активные баннеры из списка кампаний.
+        Выполняет два пакетных запроса:
+          1) /api/v2/ad_plans.json?_id__in=...&fields=ad_groups,name
+          2) /api/v2/ad_groups.json?_id__in=...&fields=banners,name
         """
-        seen = set(exceptions_banners)
+        if not campaign_ids:
+            logger.warning("⚠️ Список campaign_ids пуст — ничего не добавлено в allowed_banners")
+            return
+    
+        seen = set(allowed_banners)
+    
+        # 1️⃣ Получаем все группы по всем кампаниям сразу
         try:
-            # 1️⃣ Получаем группы кампании
-            url_plan = f"{self.base_url}/api/v2/ad_plans/{campaign_id}.json"
-            resp_plan = req_with_retry(
-                "GET",
-                url_plan,
-                headers=self.headers,
-                params={"fields": "ad_groups"},
-                timeout=STATS_TIMEOUT,
-            )
-            data_plan = resp_plan.json()
-            ad_groups = data_plan.get("ad_groups", [])
-            logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)}")
-
-            # 2️⃣ Для каждой группы запрашиваем баннеры
+            url_plans = f"{self.base_url}/api/v2/ad_plans.json"
+            params = {
+                "_status": "active",
+                "_id__in": ",".join(map(str, campaign_ids)),
+                "fields": "ad_groups,name"
+            }
+            logger.info(f"Запрашиваем группы по {len(campaign_ids)} кампаниям...")
+            resp = req_with_retry("GET", url_plans, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            plan_items = data.get("items", [])
+            logger.info(f"Получено {len(plan_items)} кампаний (batch)")
+    
+            # Собираем ID всех групп
+            group_ids = []
+            for plan in plan_items:
+                groups = plan.get("ad_groups", [])
+                for g in groups:
+                    gid = g.get("id")
+                    if gid:
+                        group_ids.append(int(gid))
+    
+            logger.info(f"Всего собрано групп: {len(group_ids)}")
+    
+            if not group_ids:
+                logger.warning("⚠️ Группы не найдены — нечего добавлять в allowed_banners")
+                return
+    
+            # 2️⃣ Получаем все баннеры по этим группам одним запросом
+            url_groups = f"{self.base_url}/api/v2/ad_groups.json"
+            params_groups = {
+                "_status": "active",
+                "_id__in": ",".join(map(str, group_ids)),
+                "fields": "banners,name"
+            }
+            logger.info(f"Запрашиваем баннеры по {len(group_ids)} группам...")
+            resp_groups = req_with_retry("GET", url_groups, headers=self.headers, params=params_groups, timeout=STATS_TIMEOUT)
+            data_groups = resp_groups.json()
+            group_items = data_groups.get("items", [])
+            logger.info(f"Получено групп с баннерами: {len(group_items)}")
+    
             added = 0
-            for g in ad_groups:
-                gid = g.get("id")
-                if not gid:
-                    continue
-                url_group = f"{self.base_url}/api/v2/ad_groups/{gid}.json"
-                resp_group = req_with_retry(
-                    "GET",
-                    url_group,
-                    headers=self.headers,
-                    params={"fields": "banners"},
-                    timeout=STATS_TIMEOUT,
-                )
-                data_group = resp_group.json()
-                banners = data_group.get("banners", [])
+            for g in group_items:
+                banners = g.get("banners", [])
                 for b in banners:
                     bid = int(b.get("id") or 0)
                     if bid and bid not in seen:
-                        exceptions_banners.append(bid)
+                        allowed_banners.append(bid)
                         seen.add(bid)
                         added += 1
-            logger.info(f"Кампания {campaign_id}: добавлено баннеров в исключения {added}")
-
+    
+            logger.info(f"✅ Добавлено {added} баннеров в allowed_banners")
+    
         except Exception as e:
-            logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в исключения: {e}")
+            logger.error(f"Ошибка при пакетном добавлении баннеров из кампаний: {e}")
+
 
     def get_banner_created(self, banner_id: int) -> Optional[dt.datetime]:
         """
