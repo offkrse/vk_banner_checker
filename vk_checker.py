@@ -621,8 +621,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     notifications = []
 
     if acc.allowed_campaigns:
-        for camp_id in acc.allowed_campaigns:
-            api.add_banners_from_allowed_campaign(camp_id, acc.allowed_banners)
+        api.add_banners_from_allowed_campaigns_bulk(acc.allowed_campaigns, acc.allowed_banners)
         logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
         
     # --- Если есть исключённые кампании, расширяем список исключённых баннеров ---
