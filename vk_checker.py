@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.21
+VersionVKChecker = 2.22
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -267,6 +267,9 @@ def load_income_data(path: str) -> Dict[str, float]:
 
 
 def tg_notify(bot_token: str, chat_id: str, text: str) -> None:
+    if DRY_RUN:
+        logger.info("🧪 [DRY RUN] TG уведомление не отправлено (тестовый режим)")
+        return
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
