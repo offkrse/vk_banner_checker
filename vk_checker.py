@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.23
+VersionVKChecker = 2.24
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -663,9 +663,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             income_all = float(income_total.get(str(bid), 0.0))
 
             # Если доход = 0 — считаем, что данных нет, пропускаем проверку дохода
-            if income_all <= 0:
-                logger.info(f"💡 Баннер {bid}: доход = 0 — проверяем дальше по обычным фильтрам")
-            else:
+            if income_all > 0:
                 diff = spent_all_time - income_all
 
                 # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
@@ -692,7 +690,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             continue
             
         logger.info(
-                f"[BANNER {bid} | GROUP {agid}]:spent = {spent:.2f},cpc = {cpc:.2f},cpa = {vk_cpa:.2f}"
+                f"[BANNER {bid} | GROUP {agid}]:spent = {spent:.2f},cpc = {cpc:.2f},cpa = {vk_cpa:.2f}, income = {income_all:.2f}"
         )
 
         # Если объявление уже потратило больше порога — не трогаем
