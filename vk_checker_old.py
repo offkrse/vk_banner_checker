@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-Version = 1.9
+VersionVKChecker = 2.1
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -57,6 +57,7 @@ class BaseFilter:
     cpc_bad_value: float = 80.0  # cpc == 0 или >= 80
     min_spent_for_cpa: float = 300.0
     cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
+    max_loss_rub: float = 2000.0  # потрачено больше дохода на N — отключаем
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
         cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
@@ -107,6 +108,7 @@ class AccountConfig:
     chat_id_env: str
     n_days: int = N_DAYS_DEFAULT
     n_all_time: bool = False
+    income_json_path: Optional[str] = None
     flt: BaseFilter = field(default_factory=BaseFilter)
     # Разрешенные 
     allowed_campaigns: List[int] = field(default_factory=list)
@@ -154,7 +156,8 @@ ACCOUNTS: List[AccountConfig] = [
         chat_id_env="TG_CHAT_ID_ZELENOV",
         n_days=2,
         n_all_time=True,
-        flt=BaseFilter(min_spent_for_cpc=150, cpc_bad_value=100, min_spent_for_cpa=330, cpa_bad_value=300),
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        flt=BaseFilter(min_spent_for_cpc=101, cpc_bad_value=100, min_spent_for_cpa=301, cpa_bad_value=300),
         banner_date_create=None,
         allowed_campaigns=load_campaigns("data/zelenov_main_allowed_campaigns.txt"),
         allowed_banners=[],
@@ -167,7 +170,8 @@ ACCOUNTS: List[AccountConfig] = [
         chat_id_env="TG_CHAT_ID_ZELENOV",
         n_days=2,
         n_all_time=True,
-        flt=BaseFilter(min_spent_for_cpc=30, cpc_bad_value=25, min_spent_for_cpa=120, cpa_bad_value=100),
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        flt=BaseFilter(min_spent_for_cpc=55, cpc_bad_value=50, min_spent_for_cpa=155, cpa_bad_value=150),
         banner_date_create=None,
         #allowed_campaigns=load_campaigns("data/zelenov_2_allowed_campaigns.txt"),
         allowed_banners=[],
@@ -233,6 +237,33 @@ def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[
     
     assert last_exc is not None
     raise last_exc
+
+def load_income_data(path: str) -> Dict[str, float]:
+    """
+    Загружает JSON с доходами и суммирует их по всем дням.
+    Возвращает словарь {banner_id -> total_income_float}
+    """
+    if not path or not os.path.exists(path):
+        logger.warning(f"⚠️ Файл доходов {path} не найден — фильтр дохода отключён")
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        income_total: Dict[str, float] = {}
+        for entry in raw:
+            data = entry.get("data", {})
+            if not isinstance(data, dict):
+                continue
+            for bid, val in data.items():
+                income_total[bid] = income_total.get(bid, 0.0) + float(val)
+
+        logger.info(f"✅ Загружены доходы по {len(income_total)} баннерам из {path}")
+        return income_total
+    except Exception as e:
+        logger.error(f"Ошибка чтения доходов из {path}: {e}")
+        return {}
 
 
 def tg_notify(bot_token: str, chat_id: str, text: str) -> None:
@@ -551,7 +582,12 @@ def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
 def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info("=" * 80)
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
-    
+
+    # --- Загружаем данные о доходах (если указаны)
+    income_total = {}
+    if acc.income_json_path:
+        income_total = load_income_data(acc.income_json_path)
+
     # 💡 Проверка: если список содержит только [0] — пропускаем
     if acc.allowed_campaigns == [0]:
         logger.warning(f"⚠️ Пропуск кабинета {acc.name}: файл кампаний пуст или не найден")
@@ -628,10 +664,30 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
 
 
         spent_all_time = sum_map.get(bid, {}).get("spent_all_time", 0.0)
+        # --- Проверка дохода: если баннер не убыточен, пропускаем остальные фильтры
+        if income_total:
+            income_all = float(income_total.get(str(bid), 0.0))
+
+            # Если доход = 0 — считаем, что данных нет, пропускаем проверку дохода
+            if income_all <= 0:
+                logger.info(f"💡 Баннер {bid}: доход = 0 — проверяем дальше по обычным фильтрам")
+            else:
+                diff = spent_all_time - income_all
+
+                # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
+                if diff <= acc.flt.max_loss_rub:
+                    logger.info(
+                        f"▶ Пропускаем баннер {bid}: доход {income_all:.2f}, потрачено {spent_all_time:.2f}, "
+                        f"разница {diff:.2f} ≤ {acc.flt.max_loss_rub} (прибыльный)"
+                    )
+                    continue
+
+
         period = period_map.get(bid, {})
         spent = float(period.get("spent", 0.0))
         cpc = float(period.get("cpc", 0.0))
         vk_cpa = float(period.get("vk.cpa", 0.0))
+        income_all = float(income_total.get(str(bid), 0.0)) if income_total else 0.0
 
         # --- Исключения ---
         if bid in acc.exceptions_banners:
@@ -676,8 +732,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             banner_name = api.get_banner_name(bid) or "Без названия"
             notifications.append(
                 f"<b>{banner_name}</b> #{bid}\n"
-                f"    ⤷ Потрачено = {spent:.2f} ₽\n"
-                f"    ⤷ Цена результата = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
+                f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = {income_all:.2f} ₽\n "
+                f"    ⤷ Результат = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
             )
         # Уведомление в TG
         #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
