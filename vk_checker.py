@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 3.00
+VersionVKChecker = 3.1
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -121,6 +121,7 @@ class AccountConfig:
     allowed_banners: List[int] = field(default_factory=list)
     exceptions_campaigns: List[int] = field(default_factory=list)
     exceptions_banners: List[int] = field(default_factory=list)
+    check_all_camp: bool = False
 
     # поля, подтягиваемые из JSON
     name: str = ""
@@ -206,6 +207,7 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/1550242935.json",
         name="Вадим-Зеленов ТМ1-5919",
+        check_all_camp=True,
         income_json_path="/opt/leads_postback/data/krolik.json",
         allowed_banners=[],
         exceptions_campaigns=[],
@@ -616,10 +618,14 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     if acc.income_json_path:
         income_total = load_income_data(acc.income_json_path)
 
-    # 💡 Проверка: если список содержит только [0] — пропускаем
-    if acc.allowed_campaigns == [0]:
-        logger.warning(f"⚠️ Пропуск кабинета {acc.name}: файл кампаний пуст или не найден")
-        return
+    # 💡 Проверка списка кампаний
+    if acc.allowed_campaigns == [0] or not acc.allowed_campaigns:
+        if acc.check_all_camp:
+            logger.info(f"{acc.name}: allowed_campaigns пуст, но check_all_camp=True → обрабатываем ВСЕ кампании")
+            acc.allowed_campaigns = []  # пустой список => разрешаем всё
+        else:
+            logger.info(f"Пропуск кабинета {acc.name}: файл кампаний пуст или не найден (check_all_camp=False)")
+            return
         
     api = VkAdsApi(token=acc.token)
     disabled_count = 0
