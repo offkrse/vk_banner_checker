@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.24
+VersionVKChecker = 2.25
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -751,8 +751,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         logger.info(f"Отправлено итоговое сообщение в TG с {len(notifications)} баннерами")
           
     if disabled_ids:
-        # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
-        backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
+        # Формируем имя файла, например: logs/disabled_MAIN.json
+        backup_path = LOG_DIR / f"disabled_{acc.name}.json"
         try:
             # Если файл уже существует, подгружаем старые ID и дописываем
             if backup_path.exists():
