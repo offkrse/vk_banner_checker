@@ -191,7 +191,7 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/1342381428.json",
         name="MAIN",
-        #income_json_path="/opt/leads_postback/data/krolik.json",
+        check_all_camp=True,
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
