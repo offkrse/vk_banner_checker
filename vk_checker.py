@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.25
+VersionVKChecker = 3.00
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -53,6 +53,8 @@ logger = logging.getLogger("vk_ads_auto")
 # Базовый фильтр согласно ТЗ
 @dataclass
 class BaseFilter:
+    spent_zero_result: float = 100.0     # Потрачено >= N и результатов = 0
+    spent_zero_clicks: float = 50.0      # Потрачено >= N и кликов = 0
     min_spent_for_cpc: float = 80.0
     cpc_bad_value: float = 80.0  # cpc == 0 или >= 80
     min_spent_for_cpa: float = 300.0
@@ -60,19 +62,27 @@ class BaseFilter:
     max_loss_rub: float = 2000.0  # потрачено больше дохода на N — отключаем
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
-        cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc == 0 or cpc >= self.cpc_bad_value)
-        cond_cpa_bad = (spent >= self.min_spent_for_cpa) and (vk_cpa == 0 or vk_cpa >= self.cpa_bad_value)
+        cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc >= self.cpc_bad_value)
+        cond_cpa_bad = (spent >= self.min_spent_for_cpa) and (vk_cpa >= self.cpa_bad_value)
         reason = []
         # Приоритет логики:
-        # 1️⃣ Если CPA плохой
+        # 1 Если CPA плохой
         if cond_cpa_bad:
             return True, f"CPA плохой ({vk_cpa:.2f} < {self.cpa_bad_value})"
             
-        # 2️⃣ Если CPC плохой, а CPA ещё не достиг минимального spent — тоже отключаем
+        # 2 Если CPC плохой, а CPA ещё не достиг минимального spent — тоже отключаем
         if cond_cpc_bad and spent < self.min_spent_for_cpa and vk_cpa == 0:
             return True, f"CPC плохой ({cpc:.2f} ≥ {self.cpc_bad_value}), а CPA ещё не достиг порога"
 
-        # 4️ Всё остальное — норм
+        # 3 Потрачено и нет результатов
+        if spent >= self.spent_zero_result and vk_cpa == 0:
+            return True, f"Нет результатов при потраченных {spent:.2f} ≥ {self.spent_zero_result}"
+
+        # 4 Потрачено и нет кликов
+        if spent >= self.spent_zero_clicks and cpc == 0:
+            return True, f"Нет кликов при потраченных {spent:.2f} ≥ {self.spent_zero_clicks}"
+        
+        # Всё остальное — норм
         return False, "Все метрики в норме"
 
 #Загрузка из списка
@@ -103,77 +113,84 @@ def load_campaigns(path: str) -> list[int]:
 # Описание кабинета
 @dataclass
 class AccountConfig:
-    name: str
-    token_env: str
-    chat_id_env: str
-    n_days: int = N_DAYS_DEFAULT
-    n_all_time: bool = False
+    # путь до JSON-файла пользователя
+    user_json_path: Optional[str] = None
+
+    # поля, которые можно переопределять вручную
     income_json_path: Optional[str] = None
-    flt: BaseFilter = field(default_factory=BaseFilter)
-    # Разрешенные 
-    allowed_campaigns: List[int] = field(default_factory=list)
     allowed_banners: List[int] = field(default_factory=list)
-    # Исключения (по умолчанию пустые)
     exceptions_campaigns: List[int] = field(default_factory=list)
     exceptions_banners: List[int] = field(default_factory=list)
-    # Дата создания баннера
+
+    # поля, подтягиваемые из JSON
+    name: str = ""
+    token_env: Optional[str] = None
+    token: Optional[str] = None
+    chat_id: Optional[str] = None
+    n_days: int = N_DAYS_DEFAULT
+    n_all_time: bool = True
+    flt: BaseFilter = field(default_factory=BaseFilter)
+    allowed_campaigns: List[int] = field(default_factory=list)
     banner_date_create: Optional[str] = None
 
-    @property
-    def token(self) -> str:
-        t = os.environ.get(self.token_env)
-        if not t:
-            raise RuntimeError(f"Не найден токен в .env: {self.token_env}")
-        return t
+    def __post_init__(self):
+        """Если указан user_json_path — загрузить все данные из него"""
+        if not self.user_json_path or not os.path.exists(self.user_json_path):
+            logger.warning(f"⚠️ Не найден user_json_path: {self.user_json_path}")
+            return
 
-    @property
-    def chat_id(self) -> str:
-        c = os.environ.get(self.chat_id_env)
-        if not c:
-            raise RuntimeError(f"Не найден chat id в .env: {self.chat_id_env}")
-        return c
+        try:
+            with open(self.user_json_path, "r", encoding="utf-8") as f:
+                user_data = json.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка чтения {self.user_json_path}: {e}")
+            return
+
+        # общий chat_id
+        chat_id = str(user_data.get("chat_id", "")) or None
+        self.chat_id = chat_id
+
+        # ищем нужный кабинет
+        for cab in user_data.get("cabinets", []):
+            if not cab.get("active", False):
+                continue
+            if cab.get("name") == self.name or cab.get("token_env") == self.token_env:
+                self.name = cab.get("name", self.name)
+                self.token_env = cab.get("token_env", self.token_env)
+
+                # ✅ Токен из .env
+                if self.token_env:
+                    self.token = os.environ.get(self.token_env)
+                    if not self.token:
+                        logger.warning(f"⚠️ Не найден токен в .env: {self.token_env}")
+
+                # кампании
+                allowed_file = cab.get("allowed_campaigns_file")
+                if allowed_file and os.path.exists(allowed_file):
+                    self.allowed_campaigns = load_campaigns(allowed_file)
+                else:
+                    logger.warning(f"⚠️ Не найден файл кампаний для {self.name}: {allowed_file}")
+
+                # фильтр
+                flt_data = cab.get("filter", {})
+                if isinstance(flt_data, dict):
+                    self.flt = BaseFilter(**flt_data)
+
+                # n_days / n_all_time
+                self.n_days = cab.get("n_days", self.n_days)
+                self.n_all_time = cab.get("n_all_time", self.n_all_time)
+                break
+
+        logger.info(f"✅ Кабинет [{self.name}] загружен из {self.user_json_path}")
 
 
 # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
 #flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ACCOUNTS: List[AccountConfig] = [
-    #AccountConfig(
-    #    name="MAIN",
-    #    token_env="VK_TOKEN_MAIN",
-    #    chat_id_env="TG_CHAT_ID_MAIN",
-    #    n_days=2,
-    #    n_all_time=True,
-    #    flt=BaseFilter(min_spent_for_cpc=120, cpc_bad_value=100, min_spent_for_cpa=201, cpa_bad_value=200),  # можно переопределять пороги per-account
-    #    banner_date_create=None,
-    #    allowed_campaigns=load_campaigns("data/main_allowed_campaigns.txt"),
-    #    allowed_banners=[],
-    #    exceptions_campaigns=[],
-    #    exceptions_banners=[],
-    #),
     AccountConfig(
-        name="ОСНОВНОЙ",
-        token_env="VK_TOKEN_ZEL_1",
-        chat_id_env="TG_CHAT_ID_ZELENOV",
-        n_days=2,
-        n_all_time=True,
-        income_json_path="/opt/leads_postback/data/krolik.json",
-        flt=BaseFilter(min_spent_for_cpc=101, cpc_bad_value=100, min_spent_for_cpa=301, cpa_bad_value=300),
-        banner_date_create=None,
-        allowed_campaigns=load_campaigns("data/zelenov_main_allowed_campaigns.txt"),
-        allowed_banners=[],
-        exceptions_campaigns=[],
-        exceptions_banners=[],
-    ),
-    AccountConfig(
-        name="Вадим-Зеленов ТМ1-5919",
-        token_env="VK_TOKEN_ZEL_2",
-        chat_id_env="TG_CHAT_ID_ZELENOV",
-        n_days=2,
-        n_all_time=True,
-        income_json_path="/opt/leads_postback/data/krolik.json",
-        flt=BaseFilter(min_spent_for_cpc=55, cpc_bad_value=50, min_spent_for_cpa=155, cpa_bad_value=150),
-        banner_date_create=None,
-        #allowed_campaigns=load_campaigns("data/zelenov_2_allowed_campaigns.txt"),
+        user_json_path="/opt/vk_checker/data/users/1342381428.json",
+        name="MAIN",
+        #income_json_path="/opt/leads_postback/data/krolik.json",
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
