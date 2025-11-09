@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 2.1
+VersionVKChecker = 2.25
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -267,6 +267,9 @@ def load_income_data(path: str) -> Dict[str, float]:
 
 
 def tg_notify(bot_token: str, chat_id: str, text: str) -> None:
+    if DRY_RUN:
+        logger.info("🧪 [DRY RUN] TG уведомление не отправлено (тестовый режим)")
+        return
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -370,111 +373,103 @@ class VkAdsApi:
             }
         return result
 
-    def add_banners_from_allowed_campaign(self, campaign_id: int, allowed_banners: List[int]) -> None:
+    def add_banners_from_allowed_campaigns_bulk(self, campaign_ids: List[int], allowed_banners: List[int]) -> None:
         """
-        Добавляет в список разрешённых баннеров все активные баннеры из указанной кампании.
-        Делает два запроса:
-          1) /api/v2/ad_plans/<id>.json?fields=ad_groups — получает все группы
-          2) /api/v2/ad_groups/<group_id>.json?fields=banners — получает баннеры каждой группы
+        Добавляет в список разрешённых баннеров все активные баннеры из списка кампаний.
+        Работает пакетно и постранично:
+          1️⃣ /api/v2/ad_plans.json?_id__in=...&fields=ad_groups,name
+          2️⃣ /api/v2/ad_groups.json?_id__in=...&fields=banners,name
         """
+        if not campaign_ids:
+            logger.warning("⚠️ Список campaign_ids пуст — ничего не добавлено в allowed_banners")
+            return
+    
         seen = set(allowed_banners)
-        try:
-            # 1️⃣ Получаем группы кампании
-            time.sleep(0.5)  # ⏳ чтобы не спамить API
-            url_plan = f"{self.base_url}/api/v2/ad_plans/{campaign_id}.json"
-            resp_plan = req_with_retry(
-                "GET",
-                url_plan,
-                headers=self.headers,
-                params={"fields": "ad_groups"},
-                timeout=STATS_TIMEOUT,
-            )
-            data_plan = resp_plan.json()
-            ad_groups = data_plan.get("ad_groups", [])
-            logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)} (для allowed)")
+        group_ids: list[int] = []
     
-            # 2️⃣ Для каждой группы запрашиваем баннеры
-            added = 0
-            for g in ad_groups:
-                gid = g.get("id")
-                if not gid:
-                    continue
+        # -------------------------------
+        # 1️⃣ Получаем все группы по всем кампаниям (с постраничным выводом)
+        # -------------------------------
+        try:
+            logger.info(f"Запрашиваем группы по {len(campaign_ids)} кампаниям (bulk, с пагинацией)...")
+            limit = 200
+            offset = 0
+    
+            while True:
+                params = {
+                    "_status": "active",
+                    "_id__in": ",".join(map(str, campaign_ids)),
+                    "fields": "ad_groups,name",
+                    "limit": limit,
+                    "offset": offset,
+                }
+                url_plans = f"{self.base_url}/api/v2/ad_plans.json"
+                resp = req_with_retry("GET", url_plans, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+                data = resp.json()
+                items = data.get("items", [])
+                if not items:
+                    break
                 
-                time.sleep(0.4)  # ⏳ пауза между запросами групп (анти-лимит)
-                url_group = f"{self.base_url}/api/v2/ad_groups/{gid}.json"
-                resp_group = req_with_retry(
-                    "GET",
-                    url_group,
-                    headers=self.headers,
-                    params={"fields": "banners"},
-                    timeout=STATS_TIMEOUT,
-                )
-                data_group = resp_group.json()
-                banners = data_group.get("banners", [])
-                for b in banners:
-                    bid = int(b.get("id") or 0)
-                    if bid and bid not in seen:
-                        allowed_banners.append(bid)
-                        seen.add(bid)
-                        added += 1
-                        # 💡 небольшая микрозадержка при массовом добавлении (если групп много)
-                        if added % 10 == 0:
-                            time.sleep(0.2)
+                for plan in items:
+                    groups = plan.get("ad_groups", [])
+                    for g in groups:
+                        gid = g.get("id")
+                        if gid:
+                            group_ids.append(int(gid))
     
-            logger.info(f"Кампания {campaign_id}: добавлено баннеров в allowed {added}")
+                logger.info(f"Получено {len(items)} кампаний (offset={offset}), всего групп {len(group_ids)}")
+    
+                if len(items) < limit:
+                    break
+                offset += limit
+    
+            if not group_ids:
+                logger.warning("⚠️ Группы не найдены — нечего добавлять в allowed_banners")
+                return
     
         except Exception as e:
-            logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в allowed: {e}")
-
-
-    def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
-        """
-        Добавляет в список исключений все активные баннеры из указанной кампании.
-        Делает два запроса:
-          1) /api/v2/ad_plans/<id>.json?fields=ad_groups — получает все группы
-          2) /api/v2/ad_groups/<group_id>.json?fields=banners — получает баннеры каждой группы
-        """
-        seen = set(exceptions_banners)
+            logger.error(f"Ошибка при получении групп из кампаний: {e}")
+            return
+    
+        # -------------------------------
+        # 2️⃣ Получаем баннеры по всем группам (с постраничным выводом)
+        # -------------------------------
         try:
-            # 1️⃣ Получаем группы кампании
-            url_plan = f"{self.base_url}/api/v2/ad_plans/{campaign_id}.json"
-            resp_plan = req_with_retry(
-                "GET",
-                url_plan,
-                headers=self.headers,
-                params={"fields": "ad_groups"},
-                timeout=STATS_TIMEOUT,
-            )
-            data_plan = resp_plan.json()
-            ad_groups = data_plan.get("ad_groups", [])
-            logger.info(f"Кампания {campaign_id}: получено групп {len(ad_groups)}")
-
-            # 2️⃣ Для каждой группы запрашиваем баннеры
+            logger.info(f"Запрашиваем баннеры по {len(group_ids)} группам (bulk, с пагинацией)...")
+            limit = 200
+            offset = 0
             added = 0
-            for g in ad_groups:
-                gid = g.get("id")
-                if not gid:
-                    continue
-                url_group = f"{self.base_url}/api/v2/ad_groups/{gid}.json"
-                resp_group = req_with_retry(
-                    "GET",
-                    url_group,
-                    headers=self.headers,
-                    params={"fields": "banners"},
-                    timeout=STATS_TIMEOUT,
-                )
-                data_group = resp_group.json()
-                banners = data_group.get("banners", [])
-                for b in banners:
-                    bid = int(b.get("id") or 0)
-                    if bid and bid not in seen:
-                        exceptions_banners.append(bid)
-                        seen.add(bid)
-                        added += 1
-            logger.info(f"Кампания {campaign_id}: добавлено баннеров в исключения {added}")
-
+    
+            # делим список group_ids на порции по limit
+            for i in range(0, len(group_ids), limit):
+                chunk = group_ids[i:i + limit]
+                params_groups = {
+                    "_status": "active",
+                    "_id__in": ",".join(map(str, chunk)),
+                    "fields": "banners,name",
+                    "limit": limit,
+                }
+                url_groups = f"{self.base_url}/api/v2/ad_groups.json"
+                resp_groups = req_with_retry("GET", url_groups, headers=self.headers, params=params_groups, timeout=STATS_TIMEOUT)
+                data_groups = resp_groups.json()
+                group_items = data_groups.get("items", [])
+    
+                for g in group_items:
+                    banners = g.get("banners", [])
+                    for b in banners:
+                        bid = int(b.get("id") or 0)
+                        if bid and bid not in seen:
+                            allowed_banners.append(bid)
+                            seen.add(bid)
+                            added += 1
+    
+                logger.info(f"Получено групп {len(group_items)} (chunk {i // limit + 1}), добавлено баннеров {added}")
+    
+            logger.info(f"✅ Добавлено {added} баннеров в allowed_banners (всего {len(allowed_banners)})")
+    
         except Exception as e:
-            logger.error(f"Ошибка при добавлении баннеров из кампании {campaign_id} в исключения: {e}")
+            logger.error(f"Ошибка при получении баннеров по группам: {e}")
+
 
     def get_banner_created(self, banner_id: int) -> Optional[dt.datetime]:
         """
@@ -599,8 +594,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     notifications = []
 
     if acc.allowed_campaigns:
-        for camp_id in acc.allowed_campaigns:
-            api.add_banners_from_allowed_campaign(camp_id, acc.allowed_banners)
+        api.add_banners_from_allowed_campaigns_bulk(acc.allowed_campaigns, acc.allowed_banners)
         logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
         
     # --- Если есть исключённые кампании, расширяем список исключённых баннеров ---
@@ -669,9 +663,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             income_all = float(income_total.get(str(bid), 0.0))
 
             # Если доход = 0 — считаем, что данных нет, пропускаем проверку дохода
-            if income_all <= 0:
-                logger.info(f"💡 Баннер {bid}: доход = 0 — проверяем дальше по обычным фильтрам")
-            else:
+            if income_all > 0:
                 diff = spent_all_time - income_all
 
                 # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
@@ -698,7 +690,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             continue
             
         logger.info(
-                f"[BANNER {bid} | GROUP {agid}]:spent = {spent:.2f},cpc = {cpc:.2f},cpa = {vk_cpa:.2f}"
+                f"[BANNER {bid} | GROUP {agid}]:spent = {spent:.2f},cpc = {cpc:.2f},cpa = {vk_cpa:.2f}, income = {income_all:.2f}"
         )
 
         # Если объявление уже потратило больше порога — не трогаем
@@ -759,8 +751,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         logger.info(f"Отправлено итоговое сообщение в TG с {len(notifications)} баннерами")
           
     if disabled_ids:
-        # Формируем имя файла, например: logs/disabled_MAIN_2025-10-29.json
-        backup_path = LOG_DIR / f"disabled_{acc.name}_{dt.date.today()}.json"
+        # Формируем имя файла, например: logs/disabled_MAIN.json
+        backup_path = LOG_DIR / f"disabled_{acc.name}.json"
         try:
             # Если файл уже существует, подгружаем старые ID и дописываем
             if backup_path.exists():
