@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.2"
+VersionVKChecker = "3.1.3"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -57,7 +57,6 @@ class BaseFilter:
     min_spent_for_cpa: float = 300.0
     cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
     max_loss_rub: float = 2000.0  # потрачено больше дохода на N — отключаем
-    spent_all_time_dont_touch: float = 2000.0  # Порог "не трогать"
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
         cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc >= self.cpc_bad_value)
@@ -116,6 +115,7 @@ class AccountConfig:
 
     # поля, которые можно переопределять вручную
     income_json_path: Optional[str] = None
+    spent_all_time_dont_touch: float = 2000.0  # Порог "не трогать"
     allowed_banners: List[int] = field(default_factory=list)
     exceptions_campaigns: List[int] = field(default_factory=list)
     exceptions_banners: List[int] = field(default_factory=list)
