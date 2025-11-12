@@ -17,15 +17,15 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = 3.1
+VersionVKChecker = 3.1.1
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
-MAX_DISABLES_PER_RUN = 25  # максимум баннеров, которые можно отключить за один запуск
+MAX_DISABLES_PER_RUN = 15  # максимум баннеров, которые можно отключить за один запуск
 
-DRY_RUN = False  #True для тестов, False для рабочего
+DRY_RUN = True  #True для тестов, False для рабочего
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
@@ -209,6 +209,15 @@ ACCOUNTS: List[AccountConfig] = [
         name="Вадим-Зеленов ТМ1-5919",
         check_all_camp=True,
         income_json_path="/opt/leads_postback/data/krolik.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/388320243.json",
+        name="Роман Каракозик Вадим-5919",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/karakoz_karas.json",
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
