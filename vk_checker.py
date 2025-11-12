@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.1"
+VersionVKChecker = "3.1.2"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -60,6 +60,7 @@ class BaseFilter:
     min_spent_for_cpa: float = 300.0
     cpa_bad_value: float = 300.0  # vk.cpa == 0 или >= 300
     max_loss_rub: float = 2000.0  # потрачено больше дохода на N — отключаем
+    spent_all_time_dont_touch: float = 2000.0  # Порог "не трогать"
 
     def violates(self, spent: float, cpc: float, vk_cpa: float) -> Tuple[bool, str]:
         cond_cpc_bad = (spent >= self.min_spent_for_cpc) and (cpc >= self.cpc_bad_value)
@@ -217,6 +218,7 @@ ACCOUNTS: List[AccountConfig] = [
         user_json_path="/opt/vk_checker/data/users/388320243.json",
         name="Роман Каракозик Вадим-5919",
         check_all_camp=True,
+        spent_all_time_dont_touch=1000,
         income_json_path="/opt/leads_postback/data/karakoz_karas.json",
         allowed_banners=[],
         exceptions_campaigns=[],
@@ -742,9 +744,9 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         )
 
         # Если объявление уже потратило больше порога — не трогаем
-        if spent_all_time > SPENT_ALL_TIME_DONT_TOUCH_RUB:
+        if spent_all_time > acc.spent_all_time_dont_touch:
             logger.info(
-                f"▶ Пропускаем: spent_all_time>{SPENT_ALL_TIME_DONT_TOUCH_RUB} (не трогаем по правилу)"
+                f"▶ Пропускаем: spent_all_time>{acc.spent_all_time_dont_touch} (не трогаем по правилу)"
             )
             continue
 
