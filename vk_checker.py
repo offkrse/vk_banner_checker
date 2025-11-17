@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.3"
+VersionVKChecker = "3.1.4"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -221,7 +221,46 @@ ACCOUNTS: List[AccountConfig] = [
         exceptions_campaigns=[],
         exceptions_banners=[],
     ),
-    
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1170798256.json",
+        name="Вадим ZK2",
+        check_all_camp=True,
+        spent_all_time_dont_touch=2000,
+        income_json_path="/opt/leads_postback/data/insta.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1170798256.json",
+        name="Гузель март 1 7007",
+        check_all_camp=True,
+        spent_all_time_dont_touch=2000,
+        income_json_path="/opt/leads_postback/data/insta.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1170798256.json",
+        name="Гузель март 2 7007",
+        check_all_camp=True,
+        spent_all_time_dont_touch=2000,
+        income_json_path="/opt/leads_postback/data/insta.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1170798256.json",
+        name="Рустам Гим ZK 7007",
+        check_all_camp=True,
+        spent_all_time_dont_touch=2000,
+        income_json_path="/opt/leads_postback/data/insta.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
 ]
 
 
