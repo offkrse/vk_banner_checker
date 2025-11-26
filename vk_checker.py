@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.92"
+VersionVKChecker = "3.1.93"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -207,6 +207,16 @@ ACCOUNTS: List[AccountConfig] = [
         name="Вадим-Зеленов ТМ1-5919",
         check_all_camp=True,
         income_json_path="/opt/leads_postback/data/krolik.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1550242935.json",
+        name="Евгений Зеленов zk 5005 1",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        spent_all_time_dont_touch=700,
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
