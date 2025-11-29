@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.93"
+VersionVKChecker = "3.1.94"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -315,7 +315,7 @@ ACCOUNTS: List[AccountConfig] = [
         user_json_path="/opt/vk_checker/data/users/466605189.json",
         name="Гузель июль 7007",
         check_all_camp=True,
-        spent_all_time_dont_touch=2000,
+        spent_all_time_dont_touch=1200,
         income_json_path="/opt/leads_postback/data/insta.json",
         allowed_banners=[],
         exceptions_campaigns=[],
@@ -444,6 +444,16 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/285360489.json",
         name="Никита Мишустин 28 августа 7007",
+        check_all_camp=True,
+        spent_all_time_dont_touch=1000,
+        income_json_path="/opt/leads_postback/data/pchelkazaim.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/285360489.json",
+        name="Мишустин-5959-5919",
         check_all_camp=True,
         spent_all_time_dont_touch=1000,
         income_json_path="/opt/leads_postback/data/pchelkazaim.json",
