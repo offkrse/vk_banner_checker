@@ -199,8 +199,9 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/test_zel.json",
         name="Основной",
+        check_all_camp=True,
         income_json_path="/opt/leads_postback/data/krolik.json",
-        spent_all_time_dont_touch=1000,
+        spent_all_time_dont_touch=2000,
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
