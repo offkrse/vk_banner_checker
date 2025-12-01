@@ -222,6 +222,16 @@ ACCOUNTS: List[AccountConfig] = [
         exceptions_banners=[],
     ),
     AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/6122996123.json",
+        name="Роман Зеленов zk 5005 1",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        spent_all_time_dont_touch=1000,
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
         user_json_path="/opt/vk_checker/data/users/388320243.json",
         name="Роман Каракозик Вадим-5919",
         check_all_camp=True,
