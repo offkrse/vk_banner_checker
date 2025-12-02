@@ -946,7 +946,7 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         reason = ""
 
         # 🔹 НОВЫЙ ФИЛЬТР: потрачено ≥ 4000 и доход = 0 → отключаем (жёсткое правило)
-        if income_total and income_all == 0.0 and spent_all_time >= 4000.0:
+        if income_total and income_all == 0.0 and spent_all_time >= 4000.0 and spent_all_time <= 6000.0:
             disable_this = True
             reason = (
                 f"Потрачено за всё время {spent_all_time:.2f} ₽ и доход = 0 ₽ "
