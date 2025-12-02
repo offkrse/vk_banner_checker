@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.95"
+VersionVKChecker = "3.1.94"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -186,6 +186,51 @@ class AccountConfig:
 # AccountConfig(name="CLIENT1", token_env="VK_TOKEN_CLIENT1", chat_id_env="TG_CHAT_ID_CLIENT1", n_days=5,
 #flt=BaseFilter(min_spent_for_cpc=60, cpc_bad_value=70, min_spent_for_cpa=250, cpa_bad_value=250)),
 ACCOUNTS: List[AccountConfig] = [
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1342381428.json",
+        name="MAIN",
+        check_all_camp=True,
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1550242935.json",
+        name="Основной",
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1550242935.json",
+        name="Вадим-Зеленов ТМ1-5919",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/1550242935.json",
+        name="Евгений Зеленов zk 5005 1",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        spent_all_time_dont_touch=700,
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/6122996123.json",
+        name="Роман Зеленов zk 5005 1",
+        check_all_camp=True,
+        income_json_path="/opt/leads_postback/data/krolik.json",
+        spent_all_time_dont_touch=1000,
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/388320243.json",
         name="Роман Каракозик Вадим-5919",
