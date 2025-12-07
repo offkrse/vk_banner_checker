@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.95"
+VersionVKChecker = "3.1.96"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -32,6 +32,8 @@ DRY_RUN = False  #True для тестов, False для рабочего
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
 
+# Сколько id шлём за один запрос статистики
+IDS_PER_REQUEST = 500
 # ==========================
 # Логирование
 # ==========================
@@ -451,6 +453,10 @@ def load_env() -> None:
 #        return "Дорогой результат"
 #    return "—"
     
+def chunked(seq, size):
+    """Возвращает последовательные куски по size элементов."""
+    for i in range(0, len(seq), size):
+        yield seq[i:i+size]
 
 def fmt_date(d: str) -> str:
     """Преобразует дату YYYY-MM-DD → DD.MM"""
@@ -575,23 +581,30 @@ class VkAdsApi:
         if not banner_ids:
             return {}
         url = f"{self.base_url}/api/v2/statistics/banners/summary.json"
-        params = {
-            "id": ",".join(map(str, banner_ids)),
-            "metrics": "base",
-        }
-        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
         result: Dict[int, Dict[str, Any]] = {}
-        for it in data.get("items", []):
-            _id = int(it.get("id"))
-            total = it.get("total", {}) or {}
-            base = total.get("base", {}) or {}
-            vk = base.get("vk", {}) or {}
-            result[_id] = {
-                "spent_all_time": float(base.get("spent", 0) or 0),
-                "cpc_all_time": float(base.get("cpc", 0) or 0),
-                "vk.cpa_all_time": float(vk.get("cpa", 0) or 0),
+    
+        for chunk in chunked(banner_ids, IDS_PER_REQUEST):
+            params = {
+                "id": ",".join(map(str, chunk)),
+                "metrics": "base",
             }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+    
+            for it in data.get("items", []):
+                _id = int(it.get("id"))
+                total = it.get("total", {}) or {}
+                base = total.get("base", {}) or {}
+                vk = base.get("vk", {}) or {}
+                result[_id] = {
+                    "spent_all_time": float(base.get("spent", 0) or 0),
+                    "cpc_all_time": float(base.get("cpc", 0) or 0),
+                    "vk.cpa_all_time": float(vk.get("cpa", 0) or 0),
+                }
+    
+            # чуть разгрузим API между пачками
+            time.sleep(0.2)
+    
         return result
 
     # --- Статистика за период (day) с total ---
@@ -599,27 +612,33 @@ class VkAdsApi:
         if not banner_ids:
             return {}
         url = f"{self.base_url}/api/v2/statistics/banners/day.json"
-        params = {
-            "id": ",".join(map(str, banner_ids)),
-            "date_from": date_from,
-            "date_to": date_to,
-            "metrics": "base",
-        }
-        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
         result: Dict[int, Dict[str, Any]] = {}
-        for it in data.get("items", []):
-            _id = int(it.get("id"))
-            total = it.get("total", {}) or {}
-            base = total.get("base", {}) or {}
-            vk = base.get("vk", {}) or {}
-            rows = it.get("rows", []) or []
-            result[_id] = {
-                "spent": float(base.get("spent", 0) or 0),
-                "cpc": float(base.get("cpc", 0) or 0),
-                "vk.cpa": float(vk.get("cpa", 0) or 0),
-                "rows": rows,
+    
+        for chunk in chunked(banner_ids, IDS_PER_REQUEST):
+            params = {
+                "id": ",".join(map(str, chunk)),
+                "date_from": date_from,
+                "date_to": date_to,
+                "metrics": "base",
             }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+    
+            for it in data.get("items", []):
+                _id = int(it.get("id"))
+                total = it.get("total", {}) or {}
+                base = total.get("base", {}) or {}
+                vk = base.get("vk", {}) or {}
+                rows = it.get("rows", []) or []
+                result[_id] = {
+                    "spent": float(base.get("spent", 0) or 0),
+                    "cpc": float(base.get("cpc", 0) or 0),
+                    "vk.cpa": float(vk.get("cpa", 0) or 0),
+                    "rows": rows,
+                }
+    
+            time.sleep(0.2)
+    
         return result
 
     def add_banners_from_allowed_campaigns_bulk(self, campaign_ids: List[int], allowed_banners: List[int]) -> None:
