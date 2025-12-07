@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.95"
+VersionVKChecker = "3.1.95 DEBUG"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -26,7 +26,7 @@ RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
 MAX_DISABLES_PER_RUN = 15  # максимум баннеров, которые можно отключить за один запуск
 
-DRY_RUN = False  #True для тестов, False для рабочего
+DRY_RUN = True  #True для тестов, False для рабочего
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
@@ -450,6 +450,35 @@ def load_env() -> None:
 #        return "Дорогой результат"
 #    return "—"
     
+def parse_json_safely(resp: requests.Response, url: str, *, allow_empty: bool = False) -> dict:
+    """
+    Безопасно разбирает JSON:
+      - 204 / пустой body -> {} (если allow_empty=True) иначе бросаем исключение
+      - Content-Type не JSON -> логируем фрагмент тела и бросаем исключение
+      - Невалидный JSON -> логируем и бросаем исключение
+    """
+    ct = (resp.headers.get("Content-Type") or "").lower()
+    text = resp.text or ""
+    # 204 No Content
+    if resp.status_code == 204 or (not text.strip()):
+        if allow_empty:
+            logging.warning(f"⚠️ {url} вернул пустой ответ (HTTP {resp.status_code})")
+            return {}
+        raise requests.JSONDecodeError("Empty body", text, 0)
+
+    if "application/json" not in ct and "json" not in ct:
+        snippet = text[:400].replace("\n", " ")
+        logging.error(f"❌ Ожидали JSON от {url}, но Content-Type={ct} (HTTP {resp.status_code}). "
+                      f"Фрагмент тела: {snippet}")
+        raise requests.JSONDecodeError("Non-JSON response", text, 0)
+
+    try:
+        return resp.json()
+    except requests.JSONDecodeError as e:
+        snippet = text[:400].replace("\n", " ")
+        logging.error(f"❌ Не удалось разобрать JSON от {url} (HTTP {resp.status_code}): {e}. "
+                      f"Фрагмент тела: {snippet}")
+        raise
 
 def fmt_date(d: str) -> str:
     """Преобразует дату YYYY-MM-DD → DD.MM"""
@@ -559,8 +588,9 @@ class VkAdsApi:
                 "_status": "active",
                 # Можно дополнительно ограничить группами: "_ad_group_status": "active",
             }
+            logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
             resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-            data = resp.json()
+            data = parse_json_safely(resp, url)
             batch = data.get("items", [])
             items.extend(batch)
             logger.info(f"Получено активных баннеров: +{len(batch)} (всего {len(items)})")
@@ -578,8 +608,9 @@ class VkAdsApi:
             "id": ",".join(map(str, banner_ids)),
             "metrics": "base",
         }
+        logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
         resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
+        data = parse_json_safely(resp, url)
         result: Dict[int, Dict[str, Any]] = {}
         for it in data.get("items", []):
             _id = int(it.get("id"))
@@ -604,8 +635,9 @@ class VkAdsApi:
             "date_to": date_to,
             "metrics": "base",
         }
+        logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
         resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
+        data = parse_json_safely(resp, url)
         result: Dict[int, Dict[str, Any]] = {}
         for it in data.get("items", []):
             _id = int(it.get("id"))
