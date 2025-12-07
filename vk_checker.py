@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-
+import json as std_json
 import os
 import sys
 import time
@@ -453,31 +453,40 @@ def load_env() -> None:
 def parse_json_safely(resp: requests.Response, url: str, *, allow_empty: bool = False) -> dict:
     """
     Безопасно разбирает JSON:
-      - 204 / пустой body -> {} (если allow_empty=True) иначе бросаем исключение
-      - Content-Type не JSON -> логируем фрагмент тела и бросаем исключение
+      - 204 / пустой body -> {} (если allow_empty=True), иначе бросаем исключение
+      - Content-Type не JSON -> логируем фрагмент и бросаем исключение
       - Невалидный JSON -> логируем и бросаем исключение
     """
     ct = (resp.headers.get("Content-Type") or "").lower()
     text = resp.text or ""
-    # 204 No Content
+
+    # 204 / пустое тело
     if resp.status_code == 204 or (not text.strip()):
         if allow_empty:
             logging.warning(f"⚠️ {url} вернул пустой ответ (HTTP {resp.status_code})")
             return {}
-        raise requests.JSONDecodeError("Empty body", text, 0)
+        raise ValueError(f"Empty body from {url}, HTTP {resp.status_code}")
 
+    # Контент не JSON
     if "application/json" not in ct and "json" not in ct:
         snippet = text[:400].replace("\n", " ")
-        logging.error(f"❌ Ожидали JSON от {url}, но Content-Type={ct} (HTTP {resp.status_code}). "
-                      f"Фрагмент тела: {snippet}")
-        raise requests.JSONDecodeError("Non-JSON response", text, 0)
+        logging.error(
+            f"❌ Ожидали JSON от {url}, но Content-Type={ct} (HTTP {resp.status_code}). "
+            f"Фрагмент тела: {snippet}"
+        )
+        raise ValueError(f"Non-JSON response from {url}, HTTP {resp.status_code}")
 
     try:
         return resp.json()
-    except requests.JSONDecodeError as e:
+    except std_json.JSONDecodeError as e:
         snippet = text[:400].replace("\n", " ")
-        logging.error(f"❌ Не удалось разобрать JSON от {url} (HTTP {resp.status_code}): {e}. "
-                      f"Фрагмент тела: {snippet}")
+        logging.error(
+            f"❌ Не удалось разобрать JSON от {url} (HTTP {resp.status_code}): {e}. "
+            f"Фрагмент тела: {snippet}"
+        )
+        raise
+    except Exception as e:
+        logging.error(f"❌ Ошибка при разборе JSON от {url}: {e}")
         raise
 
 def fmt_date(d: str) -> str:
@@ -488,14 +497,17 @@ def fmt_date(d: str) -> str:
     except Exception:
         return d
 
-def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[str, Any] | None = None,
-                   json_body: Dict[str, Any] | None = None, timeout: int = 30) -> requests.Response:
+def req_with_retry(method: str, url: str, headers: Dict[str, str],
+                   params: Dict[str, Any] | None = None,
+                   json_body: Dict[str, Any] | None = None,
+                   timeout: int = 30) -> requests.Response:
     last_exc: Optional[Exception] = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
+            logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
             resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
             
-            # 💡 Если VK API вернул лимит
+            # 💡 Лимиты VK API
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", "3"))
                 logger.warning(f"⚠️ VK API rate limit (429). Пауза {retry_after}s перед повтором...")
@@ -576,6 +588,56 @@ class VkAdsApi:
             "Accept": "application/json",
         }
 
+    def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
+        """
+        Расширяет exceptions_banners всеми активными баннерами кампании.
+        """
+        try:
+            logger.info(f"Исключения: собираем баннеры кампании {campaign_id}")
+            # 1) получаем группы кампании
+            params_plans = {
+                "_status": "active",
+                "_id__in": str(campaign_id),
+                "fields": "ad_groups,name",
+                "limit": 200,
+                "offset": 0,
+            }
+            url_plans = f"{self.base_url}/api/v2/ad_plans.json"
+            resp_plans = req_with_retry("GET", url_plans, headers=self.headers, params=params_plans, timeout=STATS_TIMEOUT)
+            data_plans = parse_json_safely(resp_plans, url_plans)
+            items = data_plans.get("items", []) or []
+            group_ids: List[int] = []
+            for plan in items:
+                for g in (plan.get("ad_groups", []) or []):
+                    gid = g.get("id")
+                    if gid:
+                        group_ids.append(int(gid))
+            if not group_ids:
+                logger.info(f"Исключения: у кампании {campaign_id} нет групп (или неактивны)")
+                return
+            # 2) собираем баннеры групп
+            seen = set(exceptions_banners)
+            for i in range(0, len(group_ids), 200):
+                chunk = group_ids[i:i+200]
+                params_groups = {
+                    "_status": "active",
+                    "_id__in": ",".join(map(str, chunk)),
+                    "fields": "banners,name",
+                    "limit": 200,
+                }
+                url_groups = f"{self.base_url}/api/v2/ad_groups.json"
+                resp_groups = req_with_retry("GET", url_groups, headers=self.headers, params=params_groups, timeout=STATS_TIMEOUT)
+                data_groups = parse_json_safely(resp_groups, url_groups)
+                for g in (data_groups.get("items", []) or []):
+                    for b in (g.get("banners", []) or []):
+                        bid = int(b.get("id") or 0)
+                        if bid and bid not in seen:
+                            exceptions_banners.append(bid)
+                            seen.add(bid)
+            logger.info(f"Исключения: добавлено баннеров из кампании {campaign_id}: {len(seen)} всего в списке")
+        except Exception as e:
+            logger.error(f"Ошибка при расширении исключений для кампании {campaign_id}: {e}")
+    
     # --- Список баннеров (объявлений) ---
     def list_active_banners(self, limit: int = 1000) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/api/v2/banners.json"
@@ -586,12 +648,10 @@ class VkAdsApi:
                 "limit": min(limit, 200),
                 "offset": offset,
                 "_status": "active",
-                # Можно дополнительно ограничить группами: "_ad_group_status": "active",
             }
-            logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
             resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
             data = parse_json_safely(resp, url)
-            batch = data.get("items", [])
+            batch = data.get("items", []) or []
             items.extend(batch)
             logger.info(f"Получено активных баннеров: +{len(batch)} (всего {len(items)})")
             if len(batch) < params["limit"]:
@@ -608,11 +668,10 @@ class VkAdsApi:
             "id": ",".join(map(str, banner_ids)),
             "metrics": "base",
         }
-        logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
         resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
         data = parse_json_safely(resp, url)
         result: Dict[int, Dict[str, Any]] = {}
-        for it in data.get("items", []):
+        for it in data.get("items", []) or []:
             _id = int(it.get("id"))
             total = it.get("total", {}) or {}
             base = total.get("base", {}) or {}
@@ -635,11 +694,10 @@ class VkAdsApi:
             "date_to": date_to,
             "metrics": "base",
         }
-        logger.debug(f"HTTP {method} {url} params={params} json={json_body}")
         resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
         data = parse_json_safely(resp, url)
         result: Dict[int, Dict[str, Any]] = {}
-        for it in data.get("items", []):
+        for it in data.get("items", []) or []:
             _id = int(it.get("id"))
             total = it.get("total", {}) or {}
             base = total.get("base", {}) or {}
@@ -685,7 +743,7 @@ class VkAdsApi:
                 }
                 url_plans = f"{self.base_url}/api/v2/ad_plans.json"
                 resp = req_with_retry("GET", url_plans, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-                data = resp.json()
+                data = parse_json_safely(resp, url_plans)
                 items = data.get("items", [])
                 if not items:
                     break
@@ -731,7 +789,7 @@ class VkAdsApi:
                 }
                 url_groups = f"{self.base_url}/api/v2/ad_groups.json"
                 resp_groups = req_with_retry("GET", url_groups, headers=self.headers, params=params_groups, timeout=STATS_TIMEOUT)
-                data_groups = resp_groups.json()
+                data_groups = parse_json_safely(resp_groups, url_groups)
                 group_items = data_groups.get("items", [])
     
                 for g in group_items:
@@ -752,15 +810,10 @@ class VkAdsApi:
 
 
     def get_banner_created(self, banner_id: int) -> Optional[dt.datetime]:
-        """
-        Получает дату создания баннера.
-        GET /api/v2/banners/<id>.json?fields=created
-        Добавлен автоповтор и пауза для обхода лимитов API.
-        """
         url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
         for attempt in range(1, 4):
             try:
-                time.sleep(0.4)  # ⏳ пауза между запросами для снижения нагрузки
+                time.sleep(0.4)
                 resp = req_with_retry(
                     "GET",
                     url,
@@ -772,16 +825,13 @@ class VkAdsApi:
                     logger.warning(f"⚠️ Rate limit при запросе created баннера {banner_id}, попытка {attempt}")
                     time.sleep(1.5 * attempt)
                     continue
-                
-                data = resp.json()
+                data = parse_json_safely(resp, url)
                 created_str = data.get("created")
                 if created_str:
-                    # Пример: "2025-10-28 14:39:40"
                     return dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
                 else:
                     logger.debug(f"Баннер {banner_id}: поле 'created' отсутствует в ответе")
                     return None
-    
             except Exception as e:
                 logger.warning(f"Не удалось получить дату создания баннера {banner_id}: {e}")
                 time.sleep(1.0 * attempt)
@@ -789,8 +839,6 @@ class VkAdsApi:
 
 
     def get_banner_name(self, banner_id: int) -> str:
-        #Получает имя баннера по его ID.
-        #GET /api/v2/banners/<id>.json?fields=name
         url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
         for attempt in range(1, 4):
             try:
@@ -806,8 +854,7 @@ class VkAdsApi:
                     logger.warning(f"⚠️ Rate limit при запросе name баннера {banner_id}, попытка {attempt}")
                     time.sleep(1.5 * attempt)
                     continue
-                
-                data = resp.json()
+                data = parse_json_safely(resp, url)
                 name = data.get("name", "")
                 return name or ""
             except Exception as e:
