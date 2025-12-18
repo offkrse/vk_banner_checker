@@ -23,9 +23,9 @@ STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
-MAX_DISABLES_PER_RUN = 3  # максимум баннеров, которые можно отключить за один запуск
+MAX_DISABLES_PER_RUN = 15  # максимум баннеров, которые можно отключить за один запуск
 
-DRY_RUN = True  #True для тестов, False для рабочего
+DRY_RUN = False  #True для тестов, False для рабочего
 
 # Период для расчёта метрик фильтра (spent, cpc, vk.cpa)
 N_DAYS_DEFAULT = 2  # Можно переопределить отдельно для каждого кабинета
@@ -35,7 +35,7 @@ N_DAYS_DEFAULT = 2  # Можно переопределить отдельно �
 # ==========================
 LOG_DIR = pathlib.Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
-log_file = LOG_DIR / "vk_checker_v4.log"
+log_file = LOG_DIR / "vk_checker_v3.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -190,18 +190,8 @@ ACCOUNTS: List[AccountConfig] = [
         user_json_path="/opt/vk_checker/data/users/1342381428.json",
         name="MAIN",
         check_all_camp=True,
-        spent_all_time_dont_touch=700,
-        income_json_path="/opt/leads_postback/data/insta.json",
-        allowed_banners=[],
-        exceptions_campaigns=[],
-        exceptions_banners=[],
-    ),
-    AccountConfig(
-        user_json_path="/opt/vk_checker/data/users/test_zel.json",
-        name="Основной",
-        check_all_camp=True,
-        income_json_path="/opt/leads_postback/data/krolik.json",
-        spent_all_time_dont_touch=2000,
+        spent_all_time_dont_touch=3000,
+        income_json_path="/opt/leads_postback/data/1russ.json",
         allowed_banners=[],
         exceptions_campaigns=[],
         exceptions_banners=[],
@@ -265,32 +255,55 @@ def req_with_retry(method: str, url: str, headers: Dict[str, str], params: Dict[
     assert last_exc is not None
     raise last_exc
 
-def load_income_data(path: str) -> Dict[str, float]:
+def load_income_data(path: str) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    Загружает JSON с доходами и суммирует их по всем дням.
-    Возвращает словарь {banner_id -> total_income_float}
+    Загружает JSON с доходами и:
+    суммирует их по всем дням (income_total)
+    отдельно суммирует доход за сегодня и вчера (income_recent)
+    Возвращает (income_total, income_recent)
     """
     if not path or not os.path.exists(path):
         logger.warning(f"⚠️ Файл доходов {path} не найден — фильтр дохода отключён")
-        return {}
+        return {}, {}
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
         income_total: Dict[str, float] = {}
+        income_recent: Dict[str, float] = {}
+
+        today = dt.date.today()
+        yesterday = today - dt.timedelta(days=1)
+        target_days = {
+            today.strftime("%d.%m.%Y"),
+            yesterday.strftime("%d.%m.%Y"),
+        }
+
         for entry in raw:
+            day_str = entry.get("day")
             data = entry.get("data", {})
             if not isinstance(data, dict):
                 continue
+
+            # суммарный доход за всё время
             for bid, val in data.items():
                 income_total[bid] = income_total.get(bid, 0.0) + float(val)
 
-        logger.info(f"✅ Загружены доходы по {len(income_total)} баннерам из {path}")
-        return income_total
+            # доход за сегодня/вчера
+            if day_str in target_days:
+                for bid, val in data.items():
+                    income_recent[bid] = income_recent.get(bid, 0.0) + float(val)
+
+        logger.info(
+            f"✅ Загружены доходы: всего баннеров={len(income_total)}, "
+            f"с доходом за сегодня/вчера={len(income_recent)} из {path}"
+        )
+        return income_total, income_recent
+
     except Exception as e:
         logger.error(f"Ошибка чтения доходов из {path}: {e}")
-        return {}
+        return {}, {}
 
 
 def tg_notify(bot_token: str, chat_id: str, text: str) -> None:
@@ -321,11 +334,66 @@ class VkAdsApi:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.headers = {
-            # Проверьте схему авторизации в вашей инсталляции (Bearer/Token/кастомный заголовок)
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
         }
+        # кеш
+        self.banner_info_cache: Dict[int, Dict[str, Any]] = {}
 
+
+    def fetch_banners_info(self, banner_ids: List[int], fields: str = "created,name") -> None:
+        """
+        Массово подтягивает информацию о баннерах и кладёт в кеш.
+        Делает /api/v2/banners.json?_id__in=...&fields=created,name,id пачками.
+        """
+        if not banner_ids:
+            return
+
+        # уникальные id и убираем те, что уже есть в кеше
+        ids_to_fetch = [bid for bid in sorted(set(banner_ids)) if bid not in self.banner_info_cache]
+        if not ids_to_fetch:
+            return
+
+        url = f"{self.base_url}/api/v2/banners.json"
+        chunk_size = 200
+
+        for i in range(0, len(ids_to_fetch), chunk_size):
+            chunk = ids_to_fetch[i:i + chunk_size]
+            params = {
+                "_id__in": ",".join(map(str, chunk)),
+                "fields": f"{fields},id",
+                "limit": len(chunk),
+            }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            items = data.get("items", []) or []
+
+            for it in items:
+                try:
+                    bid = int(it.get("id"))
+                except (TypeError, ValueError):
+                    continue
+
+                info = self.banner_info_cache.get(bid, {})
+                name = it.get("name")
+                created_str = it.get("created")
+
+                if name is not None:
+                    info["name"] = name
+                if created_str is not None:
+                    info["created"] = created_str
+                    try:
+                        info["created_dt"] = dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        # если парсинг не удался — оставим как строку
+                        pass
+
+                self.banner_info_cache[bid] = info
+
+            logger.info(
+                f"Загружено метаданных баннеров: +{len(items)} (chunk {i // chunk_size + 1}/{math.ceil(len(ids_to_fetch)/chunk_size)})"
+            )
+    
     # --- Список баннеров (объявлений) ---
     def list_active_banners(self, limit: int = 1000) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/api/v2/banners.json"
@@ -372,6 +440,32 @@ class VkAdsApi:
             }
         return result
 
+    def enable_banner(self, banner_id: int) -> bool:
+        """
+        Включает баннер обратно (status=active).
+        """
+        if DRY_RUN:
+            logger.warning(f"🧪 [DRY RUN] Баннер {banner_id} НЕ включен (тестовый режим)")
+            return True
+
+        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
+        try:
+            resp = req_with_retry(
+                method="POST",
+                url=url,
+                headers={**self.headers, "Content-Type": "application/json"},
+                json_body={"status": "active"},
+                timeout=WRITE_TIMEOUT,
+            )
+            if resp.status_code == 204:
+                logger.info(f"↩ Баннер {banner_id} успешно включён (HTTP 204)")
+                return True
+            logger.warning(f"Не удалось включить баннер {banner_id}: {resp.status_code} {resp.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка при включении баннера {banner_id}: {e}")
+            return False
+
     # --- Статистика за период (day) с total ---
     def stats_period_banners(self, banner_ids: List[int], date_from: str, date_to: str) -> Dict[int, Dict[str, Any]]:
         if not banner_ids:
@@ -400,71 +494,6 @@ class VkAdsApi:
             }
         return result
 
-    # --- Статистика за период (day) по группам ---
-    def stats_period_ad_groups(
-        self,
-        ad_group_ids: List[int],
-        date_from: str,
-        date_to: str,
-    ) -> Dict[int, Dict[str, Any]]:
-        """
-        GET /api/v2/statistics/ad_groups/day.json
-        id, date_from, date_to, metrics=base
-        """
-        if not ad_group_ids:
-            return {}
-        url = f"{self.base_url}/api/v2/statistics/ad_groups/day.json"
-        params = {
-            "id": ",".join(map(str, ad_group_ids)),
-            "date_from": date_from,
-            "date_to": date_to,
-            "metrics": "base",
-        }
-        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
-        result: Dict[int, Dict[str, Any]] = {}
-        for it in data.get("items", []):
-            _id = int(it.get("id"))
-            total = it.get("total", {}) or {}
-            base = total.get("base", {}) or {}
-            vk = base.get("vk", {}) or {}
-            rows = it.get("rows", []) or []
-            result[_id] = {
-                "spent": float(base.get("spent", 0) or 0),
-                "cpc": float(base.get("cpc", 0) or 0),
-                "vk.cpa": float(vk.get("cpa", 0) or 0),
-                "rows": rows,
-            }
-        return result
-
-    # --- Быстрая статистика по баннерам (faststat) ---
-    def faststat_banners(self, banner_ids: List[int]) -> Dict[int, int]:
-        """
-        GET /api/v3/statistics/faststat/banners.json?id=...
-        Возвращаем суммарный shows за последние 60 минут для каждого баннера.
-        """
-        if not banner_ids:
-            return {}
-        url = f"{self.base_url}/api/v3/statistics/faststat/banners.json"
-        params = {
-            "id": ",".join(map(str, banner_ids)),
-        }
-        resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
-        data = resp.json()
-
-        result: Dict[int, int] = {}
-        banners_stat = data.get("banners", {}) or {}
-        for bid_str, stat in banners_stat.items():
-            try:
-                bid = int(bid_str)
-            except (TypeError, ValueError):
-                continue
-            minutely = stat.get("minutely", {}) or {}
-            shows_list = minutely.get("shows", []) or []
-            # Суммарные показы за последние 60 минут
-            result[bid] = int(sum(shows_list))
-        return result
-  
     def add_banners_from_allowed_campaigns_bulk(self, campaign_ids: List[int], allowed_banners: List[int]) -> None:
         """
         Добавляет в список разрешённых баннеров все активные баннеры из списка кампаний.
@@ -565,67 +594,48 @@ class VkAdsApi:
 
     def get_banner_created(self, banner_id: int) -> Optional[dt.datetime]:
         """
-        Получает дату создания баннера.
-        GET /api/v2/banners/<id>.json?fields=created
-        Добавлен автоповтор и пауза для обхода лимитов API.
+        Возвращает дату создания баннера из кеша.
+        Если в кеше нет — дотягивает через fetch_banners_info.
         """
-        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
-        for attempt in range(1, 4):
-            try:
-                time.sleep(0.4)  # ⏳ пауза между запросами для снижения нагрузки
-                resp = req_with_retry(
-                    "GET",
-                    url,
-                    headers=self.headers,
-                    params={"fields": "created"},
-                    timeout=STATS_TIMEOUT,
-                )
-                if resp.status_code == 429:
-                    logger.warning(f"⚠️ Rate limit при запросе created баннера {banner_id}, попытка {attempt}")
-                    time.sleep(1.5 * attempt)
-                    continue
-                
-                data = resp.json()
-                created_str = data.get("created")
-                if created_str:
-                    # Пример: "2025-10-28 14:39:40"
-                    return dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
-                else:
-                    logger.debug(f"Баннер {banner_id}: поле 'created' отсутствует в ответе")
-                    return None
-    
-            except Exception as e:
-                logger.warning(f"Не удалось получить дату создания баннера {banner_id}: {e}")
-                time.sleep(1.0 * attempt)
-        return None
+        info = self.banner_info_cache.get(banner_id)
+        if info is None:
+            # дозагружаем только этот баннер
+            self.fetch_banners_info([banner_id], fields="created")
+            info = self.banner_info_cache.get(banner_id)
+            if info is None:
+                logger.debug(f"Баннер {banner_id}: нет данных created даже после fetch_banners_info")
+                return None
+
+        created_dt = info.get("created_dt")
+        if created_dt is not None:
+            return created_dt
+
+        created_str = info.get("created")
+        if not created_str:
+            return None
+
+        try:
+            created_dt = dt.datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+            info["created_dt"] = created_dt
+            self.banner_info_cache[banner_id] = info
+            return created_dt
+        except Exception as e:
+            logger.warning(f"Ошибка парсинга даты создания баннера {banner_id}: {e}")
+            return None
 
 
     def get_banner_name(self, banner_id: int) -> str:
-        #Получает имя баннера по его ID.
-        #GET /api/v2/banners/<id>.json?fields=name
-        url = f"{self.base_url}/api/v2/banners/{banner_id}.json"
-        for attempt in range(1, 4):
-            try:
-                time.sleep(0.4)
-                resp = req_with_retry(
-                    "GET",
-                    url,
-                    headers=self.headers,
-                    params={"fields": "name"},
-                    timeout=STATS_TIMEOUT,
-                )
-                if resp.status_code == 429:
-                    logger.warning(f"⚠️ Rate limit при запросе name баннера {banner_id}, попытка {attempt}")
-                    time.sleep(1.5 * attempt)
-                    continue
-                
-                data = resp.json()
-                name = data.get("name", "")
-                return name or ""
-            except Exception as e:
-                logger.warning(f"Не удалось получить имя баннера {banner_id}: {e}")
-                time.sleep(1.0 * attempt)
-        return ""
+        """
+        Возвращает имя баннера из кеша, при необходимости — дотягивает через fetch_banners_info.
+        """
+        info = self.banner_info_cache.get(banner_id)
+        if info is None:
+            self.fetch_banners_info([banner_id], fields="name")
+            info = self.banner_info_cache.get(banner_id)
+            if info is None:
+                logger.debug(f"Баннер {banner_id}: нет данных name даже после fetch_banners_info")
+                return ""
+        return info.get("name", "") or ""
 
     
     # --- Отключение объявления (статус blocked) ---
@@ -665,15 +675,116 @@ def daterange_for_last_n_days(n_days: int) -> Tuple[str, str]:
     since = today - dt.timedelta(days=n_days)
     return since.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
+def reenable_profitable_banners(
+    acc: AccountConfig,
+    api: VkAdsApi,
+    tg_token: str,
+    income_total: Dict[str, float],
+    income_recent: Dict[str, float],
+) -> None:
+    """
+    Включает обратно баннеры, которые мы раньше отключили, если:
+      • за сегодня или вчера есть доход (income_recent > 0),
+      • и потрачено меньше дохода на max_loss_rub (spent_all_time - income_all <= max_loss_rub).
+    Берёт список кандидатов из logs/disabled_<acc.name>.json
+    """
+    if not income_total or not income_recent:
+        logger.info(f"[{acc.name}] Нет данных доходов для перевключения баннеров")
+        return
+
+    backup_path = LOG_DIR / f"disabled_{acc.name}.json"
+    if not backup_path.exists():
+        logger.info(f"[{acc.name}] Файл с отключёнными баннерами {backup_path} не найден — нечего включать")
+        return
+
+    try:
+        with open(backup_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning(f"[{acc.name}] Файл {backup_path} имеет некорректный формат (ожидался список)")
+            return
+        disabled_ids = [int(x) for x in data]
+    except Exception as e:
+        logger.error(f"[{acc.name}] Ошибка чтения {backup_path}: {e}")
+        return
+
+    # кандидаты: есть доход за сегодня/вчера
+    candidate_ids = [bid for bid in disabled_ids if income_recent.get(str(bid), 0.0) > 0]
+    if not candidate_ids:
+        logger.info(f"[{acc.name}] Среди отключённых баннеров нет тех, у кого есть доход за сегодня/вчера")
+        return
+
+    stats_map = api.stats_summary_banners(candidate_ids)
+    reenabled_ids: List[int] = []
+    notifications: List[str] = []
+
+    for bid in candidate_ids:
+        stats = stats_map.get(bid, {}) or {}
+        spent_all_time = float(stats.get("spent_all_time", 0.0))
+        income_all = float(income_total.get(str(bid), 0.0))
+        income_last2 = float(income_recent.get(str(bid), 0.0))
+
+        diff = spent_all_time - income_all
+
+        if income_all <= 0:
+            logger.info(
+                f"[{acc.name}] ▶ Баннер {bid}: есть свежий доход {income_last2:.2f}, "
+                f"но суммарный доход {income_all:.2f} ≤ 0 — не включаем"
+            )
+            continue
+
+        if diff > acc.flt.max_loss_rub:
+            logger.info(
+                f"[{acc.name}] ▶ Баннер {bid}: не включаем — потрачено {spent_all_time:.2f}, "
+                f"доход {income_all:.2f}, разница {diff:.2f} > {acc.flt.max_loss_rub}"
+            )
+            continue
+
+        logger.info(
+            f"[{acc.name}] ↩ Попытка включить баннер {bid}: "
+            f"spent_all_time={spent_all_time:.2f}, income_all={income_all:.2f}, "
+            f"доход за 2 дня={income_last2:.2f}, diff={diff:.2f} ≤ {acc.flt.max_loss_rub}"
+        )
+
+        if api.enable_banner(bid):
+            reenabled_ids.append(bid)
+            banner_name = api.get_banner_name(bid) or "Без названия"
+            notifications.append(
+                f"<b>{banner_name}</b> #{bid}\n"
+                f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = {income_all:.2f} ₽\n"
+                f"    ⤷ Доход за сегодня/вчера = {income_last2:.2f} ₽"
+            )
+
+    if not reenabled_ids:
+        logger.info(f"[{acc.name}] Подходящих баннеров для включения не найдено")
+        return
+
+    # Обновляем список отключённых баннеров (удаляем те, что включили)
+    remaining_ids = [bid for bid in disabled_ids if bid not in reenabled_ids]
+    try:
+        with open(backup_path, "w", encoding="utf-8") as f:
+            json.dump(remaining_ids, f, ensure_ascii=False, indent=2)
+        logger.info(
+            f"[{acc.name}] Обновлён файл отключённых баннеров {backup_path}: "
+            f"было={len(disabled_ids)}, осталось={len(remaining_ids)}, включено={len(reenabled_ids)}"
+        )
+    except Exception as e:
+        logger.error(f"[{acc.name}] Ошибка сохранения {backup_path} после включения баннеров: {e}")
+
+    if notifications and acc.chat_id:
+        text = f"<b>[{acc.name}]</b>\n<b>Включены баннеры:</b>\n\n" + "\n\n".join(notifications)
+        tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
+        
 
 def process_account(acc: AccountConfig, tg_token: str) -> None:
     logger.info("=" * 80)
     logger.info(f"КАБИНЕТ: {acc.name} | n_days={acc.n_days}")
-
+    
     # --- Загружаем данные о доходах (если указаны)
-    income_total = {}
+    income_total: Dict[str, float] = {}
+    income_recent: Dict[str, float] = {}
     if acc.income_json_path:
-        income_total = load_income_data(acc.income_json_path)
+        income_total, income_recent = load_income_data(acc.income_json_path)
 
     # 💡 Проверка списка кампаний
     if acc.allowed_campaigns == [0] or not acc.allowed_campaigns:
@@ -688,7 +799,12 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     disabled_count = 0
     disabled_ids = []  # список для хранения отключённых баннеров
     notifications = []
-
+    
+    try:
+        reenable_profitable_banners(acc, api, tg_token, income_total, income_recent)
+    except Exception as e:
+        logger.error(f"[{acc.name}] Ошибка при попытке перевключения баннеров: {e}")
+    
     if acc.allowed_campaigns:
         api.add_banners_from_allowed_campaigns_bulk(acc.allowed_campaigns, acc.allowed_banners)
         logger.info(f"Итоговый список разрешённых баннеров: {len(acc.allowed_banners)}")
@@ -707,49 +823,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
     banner_ids = [int(b["id"]) for b in banners if "id" in b]
     logger.info(f"Всего активных объявлений: {len(banner_ids)}")
 
-    # Карта: группа -> список баннеров
-    group_to_banners: Dict[int, List[int]] = {}
-    for b in banners:
-        bid = int(b["id"])
-        agid = int(b.get("ad_group_id", 0) or 0)
-        group_to_banners.setdefault(agid, []).append(bid)
-
-    # Группы, в которых только один баннер
-    single_banner_group_ids = [
-        gid for gid, bids in group_to_banners.items()
-        if gid and len(bids) == 1
-    ]
-
-    # --- Статы за СЕГОДНЯ по баннерам и группам, плюс faststat ---
-    today_str = dt.date.today().strftime("%Y-%m-%d")
-    today_banner_stats: Dict[int, Dict[str, Any]] = {}
-    today_group_stats: Dict[int, Dict[str, Any]] = {}
-    faststat_shows: Dict[int, int] = {}
-
-    # /api/v2/statistics/banners/day.json за сегодня
-    try:
-        today_banner_stats = api.stats_period_banners(banner_ids, today_str, today_str)
-        logger.info(f"Получена статистика banners/day за сегодня ({today_str}) для {len(today_banner_stats)} баннеров")
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось получить статистику banners/day за сегодня: {e}")
-
-    # /api/v2/statistics/ad_groups/day.json за сегодня только для групп с одним баннером
-    if single_banner_group_ids:
-        try:
-            today_group_stats = api.stats_period_ad_groups(single_banner_group_ids, today_str, today_str)
-            logger.info(
-                f"Получена статистика ad_groups/day за сегодня ({today_str}) "
-                f"для {len(today_group_stats)} групп с одним баннером"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось получить статистику ad_groups/day за сегодня: {e}")
-
-    # /api/v3/statistics/faststat/banners.json — считаем shows за последние 60 минут
-    try:
-        faststat_shows = api.faststat_banners(banner_ids)
-        logger.info(f"Получена faststat по {len(faststat_shows)} баннерам")
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось получить faststat по баннерам: {e}")
+    #Подтягиваем created + name по всем активным баннерам одним bulk-запросом
+    api.fetch_banners_info(banner_ids, fields="created,name")
 
     # 2) Статистика
     sum_map = api.stats_summary_banners(banner_ids)
@@ -771,15 +846,24 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         period_map = api.stats_period_banners(banner_ids, date_from, date_to)
 
 
-    # 4) Пройтись по объявлениям и применить логику
+   # 4) Пройтись по объявлениям и применить логику
     for b in banners:
         bid = int(b["id"])
         agid = int(b.get("ad_group_id", 0) or 0)
+
         # --- Фильтр: разрешённые баннеры ---
         if acc.allowed_banners:
             if bid not in acc.allowed_banners:
                 logger.info(f"▶ Пропускаем баннер {bid}: не входит в allowed_banners")
                 continue
+
+        # --- Исключения ---
+        if bid in acc.exceptions_banners:
+            logger.info(f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
+            continue
+        if agid in acc.exceptions_campaigns:
+            logger.info(f"▶ Пропускаем баннер {bid} (Группа {agid}): ИСКЛЮЧЕНИЕ")
+            continue
 
         # --- Фильтр по дате создания, если указан ---
         if acc.banner_date_create:
@@ -796,95 +880,69 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
                 logger.warning(f"Ошибка проверки даты создания баннера {bid}: {e}")
                 continue
 
-
         spent_all_time = sum_map.get(bid, {}).get("spent_all_time", 0.0)
-        # --- Проверка дохода: если баннер не убыточен, пропускаем остальные фильтры
-        if income_total:
-            income_all = float(income_total.get(str(bid), 0.0))
 
-            # Если доход = 0 — считаем, что данных нет, пропускаем проверку дохода
-            if income_all > 0:
-                diff = spent_all_time - income_all
+        # доходы
+        income_all = float(income_total.get(str(bid), 0.0)) if income_total else 0.0
 
-                # если потрачено <= доход + max_loss_rub — баннер прибыльный, не трогаем
-                if diff <= acc.flt.max_loss_rub:
-                    logger.info(
-                        f"▶ Пропускаем баннер {bid}: доход {income_all:.2f}, потрачено {spent_all_time:.2f}, "
-                        f"разница {diff:.2f} ≤ {acc.flt.max_loss_rub} (прибыльный)"
-                    )
-                    continue
-
+        # --- Если есть доход и баннер в пределах max_loss_rub — считаем его ОК и не трогаем ---
+        if income_total and income_all > 0:
+            diff = spent_all_time - income_all
+            if diff <= acc.flt.max_loss_rub:
+                logger.info(
+                    f"▶ Пропускаем баннер {bid}: доход {income_all:.2f} ₽, "
+                    f"потрачено {spent_all_time:.2f} ₽, разница {diff:.2f} ≤ {acc.flt.max_loss_rub} (прибыльный)"
+                )
+                continue
 
         period = period_map.get(bid, {})
         spent = float(period.get("spent", 0.0))
         cpc = float(period.get("cpc", 0.0))
         vk_cpa = float(period.get("vk.cpa", 0.0))
-        income_all = float(income_total.get(str(bid), 0.0)) if income_total else 0.0
 
-        # --- Исключения ---
-        if bid in acc.exceptions_banners:
-            logger.info(f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
-            continue
-        if agid in acc.exceptions_campaigns:
-            logger.info(f"▶ Пропускаем баннер {bid} (Кампания {agid}): ИСКЛЮЧЕНИЕ")
-            continue
-            
-        # Основной период (summary или n_days)
         logger.info(
             f"[BANNER {bid} | GROUP {agid}]: "
-            f"period_spent = {spent:.2f}, "
-            f"period_cpc = {cpc:.2f}, "
-            f"period_cpa = {vk_cpa:.2f}, "
-            f"income = {income_all:.2f}"
+            f"spent = {spent:.2f}, cpc = {cpc:.2f}, cpa = {vk_cpa:.2f}, "
+            f"spent_all_time = {spent_all_time:.2f}, income_all = {income_all:.2f}"
         )
 
-        # --- Доп. лог: статистика за сегодня по баннеру ---
-        tb = today_banner_stats.get(bid)
-        if tb:
-            t_spent = float(tb.get("spent", 0.0))
-            t_cpc = float(tb.get("cpc", 0.0))
-            t_cpa = float(tb.get("vk.cpa", 0.0))
-            logger.info(
-                f"    ⤷ today /banners/day ({today_str}): "
-                f"spent = {t_spent:.2f}, cpc = {t_cpc:.2f}, cpa = {t_cpa:.2f}"
-            )
+        # --- Решаем, отключать ли баннер ---
+        disable_this = False
+        reason = ""
 
-        # --- Доп. лог: статистика за сегодня по группе, если в ней только один баннер ---
-        gb = today_group_stats.get(agid)
-        if gb and len(group_to_banners.get(agid, [])) == 1:
-            g_spent = float(gb.get("spent", 0.0))
-            g_cpc = float(gb.get("cpc", 0.0))
-            g_cpa = float(gb.get("vk.cpa", 0.0))
-            logger.info(
-                f"    ⤷ today /ad_groups/day (single banner in group): "
-                f"spent = {g_spent:.2f}, cpc = {g_cpc:.2f}, cpa = {g_cpa:.2f}"
+        # 🔹 НОВЫЙ ФИЛЬТР: потрачено ≥ 4000 и доход = 0 → отключаем (жёсткое правило)
+        if income_total and income_all == 0.0 and spent_all_time >= 4000.0 and spent_all_time <= 6000.0:
+            disable_this = True
+            reason = (
+                f"Потрачено за всё время {spent_all_time:.2f} ₽ и доход = 0 ₽ "
+                f"(порог 4000 ₽)"
             )
+        else:
+            # 🔹 Старое правило: если баннер уже много потратил — не трогаем,
+            # НО только если не сработало жёсткое правило выше
+            if spent_all_time > acc.spent_all_time_dont_touch:
+                logger.info(
+                    f"▶ Пропускаем баннер {bid}: spent_all_time={spent_all_time:.2f} "
+                    f"> {acc.spent_all_time_dont_touch:.2f} (не трогаем по правилу all_time_dont_touch)"
+                )
+                continue
 
-        # --- Доп. лог: faststat shows (последние 60 минут) ---
-        shows_60 = faststat_shows.get(bid)
-        if shows_60 is not None:
-            logger.info(
-                f"    ⤷ faststat last 60 min: shows = {shows_60}"
-            )
+            # Проверка фильтра CPC/CPA
+            bad, reason_filter = acc.flt.violates(spent=spent, cpc=cpc, vk_cpa=vk_cpa)
+            if not bad:
+                logger.info("✔ Прошёл фильтр — ОК")
+                continue
 
-        # Если объявление уже потратило больше порога — не трогаем
-        if spent_all_time > acc.spent_all_time_dont_touch:
-            logger.info(
-                f"▶ Пропускаем: spent_all_time>{acc.spent_all_time_dont_touch} (не трогаем по правилу)"
-            )
+            disable_this = True
+            reason = reason_filter
+
+        if not disable_this:
             continue
 
-        # Проверка фильтра
-        bad, reason = acc.flt.violates(spent=spent, cpc=cpc, vk_cpa=vk_cpa)
-        if not bad:
-            logger.info("✔ Прошёл фильтр — ОК")
-            continue
-            
         if disabled_count >= MAX_DISABLES_PER_RUN:
             logger.warning("🚨 Достигнут лимит отключений за запуск — дальнейшие баннеры не будут отключаться")
             break
 
-        # Отключаем объяву
         logger.warning(f"✖ НЕ ПРОШЁЛ ФИЛЬТР: {reason}")
         disabled = api.disable_banner(bid)
         status_msg = "ОТКЛЮЧЕНО" if disabled else "НЕ УДАЛОСЬ ОТКЛЮЧИТЬ"
@@ -892,31 +950,13 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         if disabled:
             disabled_count += 1
             disabled_ids.append(bid)
-          
-            # --- Копим уведомление ---
-            #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
+
             banner_name = api.get_banner_name(bid) or "Без названия"
             notifications.append(
                 f"<b>{banner_name}</b> #{bid}\n"
-                f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = {income_all:.2f} ₽\n "
+                f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = {income_all:.2f} ₽\n"
                 f"    ⤷ Результат = {vk_cpa:.2f} ₽ | Цена клика = {cpc:.2f} ₽"
             )
-        # Уведомление в TG
-        #reason_short = short_reason(spent, cpc, vk_cpa, acc.flt)
-        #date_from_fmt, date_to_fmt = fmt_date(date_from), fmt_date(date_to)
-        #banner_name = api.get_banner_name(bid) or "Без названия"
-        #text = (
-        #    f"<b>[{acc.name}]</b>\n"
-        #    f"<b>Баннер \"{banner_name}\" #{bid}</b> — {status_msg}\n"
-        #    f"Причина: {reason_short}\n\n"
-        #    f"<b>Статистика:</b>\n"
-        #    f"Потрачено за всё время = {spent_all_time:.2f} RUB\n"
-        #    f"За период с {date_from_fmt} по {date_to_fmt}:\n"
-        #    f"    - Потрачено = {spent:.2f}\n"
-        #    f"    - Цена клика = {cpc:.2f}\n"
-        #    f"    - Цена результата = {vk_cpa:.2f}"
-        #)
-        #tg_notify(bot_token=tg_token, chat_id=acc.chat_id, text=text)
   
     # --- Отправка ---
     if notifications:
