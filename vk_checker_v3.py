@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "--3.4.4--"
+VersionVKChecker = "--3.4.5--"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -590,7 +590,109 @@ class VkAdsApi:
                 "rows": rows,
             }
         return result
+        
+    def add_banners_from_campaigns_to_list_bulk(self, campaign_ids: List[int], target_banners: List[int]) -> None:
+        """
+        Универсально: добавляет в target_banners все активные баннеры из списка кампаний (ad_plans).
+        Пакетно:
+          1) /api/v2/ad_plans.json -> ad_groups
+          2) /api/v2/ad_groups.json -> banners
+        """
+        if not campaign_ids:
+            return
 
+        seen = set(int(x) for x in target_banners)
+        group_ids: List[int] = []
+
+        # 1) кампании -> группы
+        try:
+            logger.info(f"Запрашиваем группы по {len(campaign_ids)} кампаниям (bulk)...")
+            limit = 200
+            offset = 0
+
+            while True:
+                params = {
+                    "_status": "active",
+                    "_id__in": ",".join(map(str, campaign_ids)),
+                    "fields": "ad_groups,name",
+                    "limit": limit,
+                    "offset": offset,
+                }
+                url_plans = f"{self.base_url}/api/v2/ad_plans.json"
+                resp = req_with_retry("GET", url_plans, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+                data = resp.json()
+                items = data.get("items", []) or []
+                if not items:
+                    break
+
+                for plan in items:
+                    for g in plan.get("ad_groups", []) or []:
+                        gid = g.get("id")
+                        if gid:
+                            group_ids.append(int(gid))
+
+                logger.info(f"Получено кампаний: {len(items)} (offset={offset}), всего групп: {len(group_ids)}")
+
+                if len(items) < limit:
+                    break
+                offset += limit
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении групп из кампаний: {e}")
+            return
+
+        if not group_ids:
+            logger.warning("⚠️ Группы не найдены — нечего добавлять в список баннеров")
+            return
+
+        # 2) группы -> баннеры
+        try:
+            logger.info(f"Запрашиваем баннеры по {len(group_ids)} группам (bulk)...")
+            limit = 200
+            added = 0
+
+            for i in range(0, len(group_ids), limit):
+                chunk = group_ids[i:i + limit]
+                params_groups = {
+                    "_status": "active",
+                    "_id__in": ",".join(map(str, chunk)),
+                    "fields": "banners,name",
+                    "limit": limit,
+                }
+                url_groups = f"{self.base_url}/api/v2/ad_groups.json"
+                resp_groups = req_with_retry("GET", url_groups, headers=self.headers, params=params_groups, timeout=STATS_TIMEOUT)
+                data_groups = resp_groups.json()
+                group_items = data_groups.get("items", []) or []
+
+                for g in group_items:
+                    for b in g.get("banners", []) or []:
+                        bid = int(b.get("id") or 0)
+                        if bid and bid not in seen:
+                            target_banners.append(bid)
+                            seen.add(bid)
+                            added += 1
+
+                logger.info(f"Chunk {i // limit + 1}: групп={len(group_items)}, добавлено баннеров={added}")
+
+            logger.info(f"✅ Добавлено баннеров: {added} (итого в списке {len(target_banners)})")
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении баннеров по группам: {e}")
+
+    def add_banners_from_campaign_to_exceptions(self, campaign_id: int, exceptions_banners: List[int]) -> None:
+        """
+        Совместимость с вашим вызовом: добавляет баннеры кампании в exceptions_banners.
+        """
+        if not campaign_id:
+            return
+        self.add_banners_from_campaigns_to_list_bulk([campaign_id], exceptions_banners)
+
+    def add_banners_from_campaigns_to_exceptions_bulk(self, campaign_ids: List[int], exceptions_banners: List[int]) -> None:
+        """
+        Удобный bulk-вариант.
+        """
+        self.add_banners_from_campaigns_to_list_bulk(campaign_ids, exceptions_banners)
+        
     def add_banners_from_allowed_campaigns_bulk(self, campaign_ids: List[int], allowed_banners: List[int]) -> None:
         """
         Добавляет в список разрешённых баннеров все активные баннеры из списка кампаний.
@@ -908,8 +1010,8 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         
     # --- Если есть исключённые кампании, расширяем список исключённых баннеров ---
     if acc.exceptions_campaigns:
-        for camp_id in acc.exceptions_campaigns:
-            api.add_banners_from_campaign_to_exceptions(camp_id, acc.exceptions_banners)
+        api.add_banners_from_campaigns_to_exceptions_bulk(acc.exceptions_campaigns, acc.exceptions_banners)
+        acc.exceptions_banners = list(sorted(set(acc.exceptions_banners)))
         logger.info(f"Итоговый список исключённых баннеров: {len(acc.exceptions_banners)}")
         
     # 1) Список активных объявлений
@@ -957,9 +1059,6 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
         # --- Исключения ---
         if bid in acc.exceptions_banners:
             logger.info(f"▶ Пропускаем баннер {bid}: ИСКЛЮЧЕНИЕ")
-            continue
-        if agid in acc.exceptions_campaigns:
-            logger.info(f"▶ Пропускаем баннер {bid} (Группа {agid}): ИСКЛЮЧЕНИЕ")
             continue
 
         # --- Фильтр по дате создания, если указан ---
