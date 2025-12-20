@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.3-"
+VERSION = "-4.0.4-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -949,7 +949,19 @@ def process_cabinet(
 ) -> None:
     cabinet_id = str(cabinet.get("id") or "").strip()
     cabinet_name = str(cabinet.get("name") or cabinet_id or "CABINET").strip()
-    token = str(cabinet.get("token") or "").strip()
+    token_ref = str(cabinet.get("token") or "").strip()
+    
+    token = ""
+    if token_ref:
+        # 1) если token_ref совпадает с переменной окружения — берём её значение
+        env_val = os.environ.get(token_ref)
+        if env_val:
+            token = str(env_val).strip()
+        else:
+            # 2) иначе считаем, что в token_ref уже лежит реальный токен
+            token = token_ref
+    
+    # поддержка старого/альтернативного поля token_env (на всякий случай)
     if not token:
         token_env = str(cabinet.get("token_env") or "").strip()
         if token_env:
