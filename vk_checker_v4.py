@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.4-"
+VERSION = "-4.0.5-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -287,7 +287,7 @@ class VkAdsApi:
                     continue
 
                 info = self.banner_info_cache.get(bid, {})
-                for k in ("name", "created", "url", "link_url", "destination_url", "ad_group_id"):
+                for k in ("name", "created", "content", "ad_group_id"):
                     if k in it and it.get(k) is not None:
                         info[k] = it.get(k)
 
@@ -314,9 +314,81 @@ class VkAdsApi:
     def get_banner_url(self, banner_id: int) -> str:
         info = self.banner_info_cache.get(banner_id)
         if info is None:
-            self.fetch_banners_info([banner_id], fields="url,link_url,destination_url")
+            self.fetch_banners_info([banner_id], fields="content")
             info = self.banner_info_cache.get(banner_id, {})
-        return (info.get("url") or info.get("link_url") or info.get("destination_url") or "").strip()
+    
+        content = info.get("content")
+        if not isinstance(content, dict):
+            return ""
+    
+        # -------------------------
+        # 1) Видео: video_portrait_9_16_30s -> high-first_frame -> url
+        #    если нет, то любое video_portrait_* -> high-first_frame -> url
+        # -------------------------
+        def pick_video_key() -> Optional[str]:
+            if "video_portrait_9_16_30s" in content:
+                return "video_portrait_9_16_30s"
+            # любое video_portrait_
+            for k in content.keys():
+                if isinstance(k, str) and k.startswith("video_portrait_"):
+                    return k
+            return None
+    
+        vkey = pick_video_key()
+        if vkey:
+            vobj = content.get(vkey)
+            if isinstance(vobj, dict):
+                variants = vobj.get("variants")
+                if isinstance(variants, dict):
+                    # строго: high-first_frame
+                    hf = variants.get("high-first_frame")
+                    if isinstance(hf, dict):
+                        url = hf.get("url")
+                        if isinstance(url, str) and url.strip():
+                            return url.strip()
+                    # небольшой fallback: любой *first_frame*
+                    for kk, vv in variants.items():
+                        if isinstance(kk, str) and "first_frame" in kk and isinstance(vv, dict):
+                            url = vv.get("url")
+                            if isinstance(url, str) and url.strip():
+                                return url.strip()
+    
+        # -------------------------
+        # 2) Картинка: image_* -> variants["90x90"] иначе variants["uploaded"] -> url
+        #    key может быть image_600x600, image_1080x1080 и т.п.
+        # -------------------------
+        def pick_image_key() -> Optional[str]:
+            for k in content.keys():
+                if isinstance(k, str) and k.startswith("image_"):
+                    return k
+            return None
+    
+        ikey = pick_image_key()
+        if ikey:
+            iobj = content.get(ikey)
+            if isinstance(iobj, dict):
+                variants = iobj.get("variants")
+                if isinstance(variants, dict):
+                    v90 = variants.get("90x90")
+                    if isinstance(v90, dict):
+                        url = v90.get("url")
+                        if isinstance(url, str) and url.strip():
+                            return url.strip()
+    
+                    up = variants.get("uploaded")
+                    if isinstance(up, dict):
+                        url = up.get("url")
+                        if isinstance(url, str) and url.strip():
+                            return url.strip()
+    
+                    # fallback: если ни 90x90 ни uploaded нет — возьмём любой url из variants
+                    for vv in variants.values():
+                        if isinstance(vv, dict):
+                            url = vv.get("url")
+                            if isinstance(url, str) and url.strip():
+                                return url.strip()
+    
+        return ""
 
     def stats_summary_banners(self, banner_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         if not banner_ids:
@@ -987,7 +1059,7 @@ def process_cabinet(
         logger.info("Баннеров не найдено")
         return
 
-    api.fetch_banners_info(all_ids, fields="created,name,url,link_url,destination_url,ad_group_id")
+    api.fetch_banners_info(all_ids, fields="created,name,content,ad_group_id")
 
     # Важно: цель (TARGET_ACTION) берём по ad_groups objective
     banner_objectives = api.build_banner_objectives_cache()
