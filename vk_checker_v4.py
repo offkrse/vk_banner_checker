@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.6-"
+VERSION = "-4.1.0-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -93,7 +93,7 @@ def safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def now_str() -> str:
-    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (dt.datetime.now() + dt.timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def req_with_retry(
@@ -128,6 +128,30 @@ def req_with_retry(
     assert last_exc is not None
     raise last_exc
 
+# Human reason ================================================
+
+def op_to_human(op: str) -> str:
+    op = (op or "").upper()
+    return {
+        "LT": "<",
+        "LTE": "≤",
+        "EQ": "=",
+        "GTE": "≥",
+        "GT": ">",
+    }.get(op, op)
+
+
+def metric_to_human(metric: str) -> str:
+    metric = (metric or "").upper()
+    return {
+        "SPENT": "Расход",
+        "CLICKS": "Клики",
+        "RESULTS": "Результаты",
+        "CLICK_COST": "Цена клика",
+        "RESULT_COST": "Цена результата (CPA)",
+        "CPC": "Цена клика",
+        "CPA": "Цена результата (CPA)",
+    }.get(metric, metric)
 
 # ============================================================
 # Telegram
@@ -770,15 +794,11 @@ def eval_conditions(
     return True
 
 
-def eval_cost_rule(
-    rule: Dict[str, Any],
-    banner_id: int,
-    stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
-) -> bool:
+def eval_cost_rule(rule: Dict[str, Any], banner_id: int, stats_by_period: Dict[str, Dict[int, Dict[str, Any]]]) -> Tuple[bool, str]:
     if not isinstance(rule, dict):
-        return False
+        return False, ""
     if (rule.get("type") or "").upper() != "COST_RULE":
-        return False
+        return False, ""
 
     spent_rub = safe_float(rule.get("spentRub", 0))
     metric = (rule.get("metric") or "").upper()
@@ -791,12 +811,21 @@ def eval_cost_rule(
     mv = metric_value_from_stats(stats)
 
     if mv["SPENT"] < spent_rub:
-        return False
+        return False, ""
 
     if metric not in mv:
-        return False
+        return False, ""
 
-    return op_compare(mv[metric], op, value)
+    ok = op_compare(mv[metric], op, value)
+    if not ok:
+        return False, ""
+
+    # причина
+    reason = (
+        f"{metric_to_human(metric)} {op_to_human(op)} {value:.2f} "
+        f"при расходе ≥ {spent_rub:.2f} (период {period_to_label(period)})"
+    )
+    return True, reason
 
 
 def eval_filter_node(
@@ -806,9 +835,9 @@ def eval_filter_node(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
-) -> str:
+) -> Tuple[str, str]:
     if not isinstance(node, dict):
-        return "NOOP"
+        return "NOOP", ""
 
     ntype = (node.get("type") or "").upper()
     if ntype != "FILTER":
@@ -826,27 +855,35 @@ def eval_filter_node(
             child = node.get("child")
             return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
-    rule_results: List[bool] = []
+    rule_hits: List[Tuple[bool, str]] = []
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
-            rule_results.append(eval_cost_rule(r, banner_id, stats_by_period))
+            rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
         else:
-            rule_results.append(False)
+            rule_hits.append((False, ""))
 
-    if not rule_results:
+    hit_bools = [x[0] for x in rule_hits]
+    if not hit_bools:
         matched = False
     elif mode == "ANY":
-        matched = any(rule_results)
+        matched = any(hit_bools)
     else:
-        matched = all(rule_results)
+        matched = all(hit_bools)
 
     if matched:
+        # причина
+        reasons = [x[1] for x in rule_hits if x[0] and x[1]]
+        if mode == "ANY":
+            reason = reasons[0] if reasons else ""
+        else:
+            reason = "; ".join(reasons) if reasons else ""
+
         action = node.get("action") or {}
         if isinstance(action, dict) and (action.get("type") or "").upper() == "SET_STATE":
             state = (action.get("state") or "NOOP").upper()
             if state in ("DISABLE", "ENABLE", "NOOP"):
-                return state
-        return "NOOP"
+                return state, reason
+        return "NOOP", ""
 
     child = node.get("child")
     return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
@@ -860,7 +897,7 @@ def decide_action_for_banner(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
-) -> str:
+) -> Tuple[str, str]:
     ordered = sorted(
         [t for t in templates if isinstance(t, dict)],
         key=lambda x: int(x.get("priority", 9999) or 9999),
@@ -881,11 +918,15 @@ def decide_action_for_banner(
                 continue
 
         child = root.get("child") or {}
-        state = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+        state, reason = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
         if state and state.upper() != "NOOP":
-            return state.upper()
+            # добавим в причину название шаблона, чтобы человеку было понятно
+            tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
+            if tpl_name:
+                reason = f"[{tpl_name}] {reason}".strip()
+            return state.upper(), reason
 
-    return "NOOP"
+    return "NOOP", ""
 
 
 # ============================================================
@@ -896,6 +937,30 @@ def disabled_file_path(users_root: str, tg_id: str, cabinet_id: str) -> pathlib.
     ensure_dir(p)
     return p / "disabled_banners.json"
 
+def enabled_file_path(users_root: str, tg_id: str, cabinet_id: str) -> pathlib.Path:
+    p = pathlib.Path(users_root) / str(tg_id) / str(cabinet_id)
+    ensure_dir(p)
+    return p / "enabled_banners.json"
+
+
+def history_file_path(users_root: str, tg_id: str, cabinet_id: str) -> pathlib.Path:
+    p = pathlib.Path(users_root) / str(tg_id) / str(cabinet_id)
+    ensure_dir(p)
+    return p / "history_banners.json"
+
+def append_history(path: pathlib.Path, record: Dict[str, str]) -> None:
+    try:
+        data: List[Dict[str, str]] = []
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                data = [x for x in raw if isinstance(x, dict)]
+        data.append(record)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка записи history {path}: {e}")
 
 def load_disabled_records(path: pathlib.Path) -> Dict[str, Dict[str, str]]:
     if not path.exists():
@@ -933,11 +998,15 @@ def save_disabled_records(path: pathlib.Path, records: Dict[str, Dict[str, str]]
         logger.error(f"Ошибка сохранения {path}: {e}")
 
 
-def make_disabled_record(
+def make_banner_record(
     banner_id: int,
     name: str,
     url: str,
     stats_all_time: Dict[str, Any],
+    *,
+    status: str,
+    checker_enabled: str,
+    reason: str,
 ) -> Dict[str, str]:
     mv = metric_value_from_stats(stats_all_time or {})
     return {
@@ -945,13 +1014,15 @@ def make_disabled_record(
         "id_banner": str(banner_id),
         "name_banner": name or "",
         "url": url or "",
+        "reason": reason or "",
+        "status": status,
+        "checker_enabled": checker_enabled,
         "spent_all_time": f"{mv['SPENT']:.2f}",
         "goals_all_time": f"{mv['RESULTS']:.0f}",
         "cpa_all_time": f"{mv['RESULT_COST']:.2f}",
         "clicks_all_time": f"{mv['CLICKS']:.0f}",
         "cpc_all_time": f"{mv['CLICK_COST']:.2f}",
     }
-
 
 # ============================================================
 # User config + settings loader
@@ -1130,6 +1201,11 @@ def process_cabinet(
     dis_path = disabled_file_path(users_root, tg_id, cabinet_id)
     disabled_records = load_disabled_records(dis_path)
 
+    en_path = enabled_file_path(users_root, tg_id, cabinet_id)
+    enabled_records = load_disabled_records(en_path)
+
+    his_path = history_file_path(users_root, tg_id, cabinet_id)
+    
     active_by_id: Dict[int, Dict[str, Any]] = {}
     blocked_by_id: Dict[int, Dict[str, Any]] = {}
     for b in active_banners:
@@ -1164,7 +1240,7 @@ def process_cabinet(
         
         bobj = active_by_id.get(bid, {})
 
-        state = decide_action_for_banner(
+        state, reason = decide_action_for_banner(
             templates=templates,
             cabinet_id=cabinet_id,
             banner_id=bid,
@@ -1191,9 +1267,17 @@ def process_cabinet(
         url = api.get_banner_url(bid)
         stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
         stats_all = (stats_by_period.get(stats_all_key, {}) or {}).get(bid, {}) or {}
-
-        rec = make_disabled_record(bid, name, url, stats_all)
+        
+        rec = make_banner_record(
+            bid, name, url, stats_all,
+            status="off",
+            checker_enabled="on",
+            reason=reason or "Отключено фильтром",
+        )
+        
         disabled_records[str(bid)] = rec
+        enabled_records.pop(str(bid), None)
+        append_history(his_path, rec)
 
         mv = metric_value_from_stats(stats_all)
         income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
@@ -1219,7 +1303,7 @@ def process_cabinet(
         
         bobj = blocked_by_id.get(bid, {})
 
-        state = decide_action_for_banner(
+        state, reason = decide_action_for_banner(
             templates=templates,
             cabinet_id=cabinet_id,
             banner_id=bid,
@@ -1228,21 +1312,31 @@ def process_cabinet(
             income_store=income_store,
             banner_objectives=banner_objectives,
         )
-
         if state != "ENABLE":
             continue
-
+        
         ok = api.enable_banner(bid)
         if not ok:
             continue
-
+        
         name = api.get_banner_name(bid) or "Без названия"
+        url = api.get_banner_url(bid)
         stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
         stats_all = (stats_by_period.get(stats_all_key, {}) or {}).get(bid, {}) or {}
-        mv = metric_value_from_stats(stats_all)
-        income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
-
+        
+        rec = make_banner_record(
+            bid, name, url, stats_all,
+            status="on",
+            checker_enabled="on",   # требование: если включен фильтром -> on
+            reason=reason or "Включено фильтром",
+        )
+        
+        # переносим между списками
         disabled_records.pop(str(bid), None)
+        enabled_records[str(bid)] = rec
+        
+        # история: только дописываем
+        append_history(his_path, rec)
 
         notify_enabled.append(
             f"<b>{name}</b> #{bid}\n"
@@ -1251,7 +1345,11 @@ def process_cabinet(
         )
 
     save_disabled_records(dis_path, disabled_records)
-    logger.info(f"💾 disabled_banners.json обновлён: {dis_path} (records={len(disabled_records)})")
+    save_disabled_records(en_path, enabled_records)
+    
+    logger.info(f"💾 disabled_banners.json: {dis_path} (records={len(disabled_records)})")
+    logger.info(f"💾 enabled_banners.json:  {en_path} (records={len(enabled_records)})")
+    logger.info(f"🧾 history_banners.json:  {his_path}")
 
     if tg_bot_token and chat_id:
         if notify_disabled:
