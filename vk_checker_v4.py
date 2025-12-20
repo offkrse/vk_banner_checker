@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.2-"
+VERSION = "-4.0.3-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -115,7 +115,7 @@ def req_with_retry(
                 time.sleep(retry_after)
                 continue
 
-            if resp.status_code >= 500:
+            if resp.status_code >= 400:
                 raise requests.HTTPError(f"{resp.status_code} {resp.text}")
 
             return resp
@@ -950,6 +950,10 @@ def process_cabinet(
     cabinet_id = str(cabinet.get("id") or "").strip()
     cabinet_name = str(cabinet.get("name") or cabinet_id or "CABINET").strip()
     token = str(cabinet.get("token") or "").strip()
+    if not token:
+        token_env = str(cabinet.get("token_env") or "").strip()
+        if token_env:
+            token = str(os.environ.get(token_env, "")).strip()
 
     if not cabinet_id or not token:
         logger.warning(f"[{tg_id}] Пропуск кабинета: не хватает id/token. cabinet={cabinet}")
