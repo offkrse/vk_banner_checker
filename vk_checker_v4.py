@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.1-"
+VERSION = "-4.1.2-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1031,7 +1031,8 @@ def make_banner_record(
     status: str,
     checker_enabled: str,
     reason: str,
-    short_reason: str
+    short_reason: str,
+    income: float,
 ) -> Dict[str, str]:
     mv = metric_value_from_stats(stats_all_time or {})
     return {
@@ -1043,6 +1044,7 @@ def make_banner_record(
         "short_reason": short_reason or "",
         "status": status,
         "checker_enabled": checker_enabled,
+        "income": f"{float(income):.2f}",
         "spent_all_time": f"{mv['SPENT']:.2f}",
         "goals_all_time": f"{mv['RESULTS']:.0f}",
         "cpa_all_time": f"{mv['RESULT_COST']:.2f}",
@@ -1293,6 +1295,7 @@ def process_cabinet(
         url = api.get_banner_url(bid)
         stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
         stats_all = (stats_by_period.get(stats_all_key, {}) or {}).get(bid, {}) or {}
+        income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
         
         rec = make_banner_record(
             bid, name, url, stats_all,
@@ -1300,6 +1303,7 @@ def process_cabinet(
             checker_enabled="on",
             reason=reason or "Отключено фильтром",
             short_reason=short_reason or "",
+            income=income_all,
         )
         
         disabled_records[str(bid)] = rec
@@ -1350,6 +1354,7 @@ def process_cabinet(
         url = api.get_banner_url(bid)
         stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
         stats_all = (stats_by_period.get(stats_all_key, {}) or {}).get(bid, {}) or {}
+        income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
         
         rec = make_banner_record(
             bid, name, url, stats_all,
@@ -1357,6 +1362,7 @@ def process_cabinet(
             checker_enabled="on",
             reason=reason or "Включено фильтром",
             short_reason=short_reason or "",
+            income=income_all,
         )
         
         # переносим между списками
