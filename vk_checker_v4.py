@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.1-"
+VERSION = "-4.0.2-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -34,10 +34,18 @@ DEFAULT_USERS_ROOT = os.environ.get("VK_CHECKER_USERS_ROOT", "/opt/vk_checker/v4
 # ============================================================
 # Логирование
 # ============================================================
+
+LOG_DIR = pathlib.Path("/opt/vk_checker/v4/logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "vk_checker_v4.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("vk_checker_v4")
 
@@ -45,11 +53,30 @@ logger = logging.getLogger("vk_checker_v4")
 # ============================================================
 # Утилиты
 # ============================================================
-def load_env() -> None:
+def load_global_env() -> None:
+    """Глобальный .env (TG_BOT_TOKEN и прочее общее)."""
+    env_path = pathlib.Path("/opt/vk_checker/v4/.env")
     try:
-        load_dotenv()
-    except Exception:
-        pass
+        if env_path.exists():
+            load_dotenv(dotenv_path=str(env_path), override=False)
+        else:
+            logger.warning(f"⚠️ Глобальный .env не найден: {env_path}")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось загрузить глобальный .env: {e}")
+
+
+def load_user_env(users_root: str, tg_id: Optional[str]) -> None:
+    """Пользовательский .env: /opt/vk_checker/v4/users/<tg_id>/.env"""
+    if not tg_id:
+        return
+    env_path = pathlib.Path(users_root) / str(tg_id) / ".env"
+    try:
+        if env_path.exists():
+            load_dotenv(dotenv_path=str(env_path), override=False)
+        else:
+            logger.warning(f"⚠️ .env пользователя не найден: {env_path}")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось загрузить .env пользователя {tg_id}: {e}")
 
 
 def ensure_dir(p: pathlib.Path) -> None:
@@ -1076,7 +1103,7 @@ def process_cabinet(
 # main
 # ============================================================
 def main() -> None:
-    load_env()
+    load_global_env()
 
     parser = argparse.ArgumentParser(description="VK checker v4 (dynamic users/filters)")
     parser.add_argument("--user", help="TG user id (folder name) to process only this user", default=None)
@@ -1106,6 +1133,7 @@ def main() -> None:
     logger.info(f"Старт {VERSION} | users={len(users)} | dry_run={dry_run} | users_root={users_root}")
 
     for tg_id in users:
+        load_user_env(users_root, tg_id)
         try:
             cfg = load_user_config(users_root, tg_id)
             settings = load_user_settings(users_root, tg_id)
