@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.2-"
+VERSION = "-4.1.4-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -72,7 +72,7 @@ def load_user_env(users_root: str, tg_id: Optional[str]) -> None:
     env_path = pathlib.Path(users_root) / str(tg_id) / ".env"
     try:
         if env_path.exists():
-            load_dotenv(dotenv_path=str(env_path), override=False)
+            load_dotenv(dotenv_path=str(env_path), override=True)
         else:
             logger.warning(f"⚠️ .env пользователя не найден: {env_path}")
     except Exception as e:
@@ -856,7 +856,7 @@ def eval_filter_node(
     banner_objectives: Dict[int, str],
 ) -> Tuple[str, str, str]:
     if not isinstance(node, dict):
-        return "NOOP", ""
+        return "NOOP", "", ""
 
     ntype = (node.get("type") or "").upper()
     if ntype != "FILTER":
@@ -879,7 +879,7 @@ def eval_filter_node(
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
         else:
-            rule_hits.append((False, ""))
+            rule_hits.append((False, "", ""))
 
     hit_bools = [x[0] for x in rule_hits]
     if not hit_bools:
@@ -906,7 +906,7 @@ def eval_filter_node(
             state = (action.get("state") or "NOOP").upper()
             if state in ("DISABLE", "ENABLE", "NOOP"):
                 return state, reason, short_reason
-        return "NOOP", ""
+        return "NOOP", "", ""
 
     child = node.get("child")
     return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
@@ -1314,8 +1314,9 @@ def process_cabinet(
         income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
         notify_disabled.append(
             f"<b>{name}</b> #{bid}\n"
-            f"    ⤷ Потрачено(all) = {mv['SPENT']:.2f} ₽ | Доход(all) = {income_all:.2f} ₽\n"
-            f"    ⤷ Результаты(all) = {mv['RESULTS']:.0f} | CPA(all) = {mv['RESULT_COST']:.2f} ₽ | CPC(all) = {mv['CLICK_COST']:.2f} ₽"
+            f"    ⤷ Потрачено = {mv['SPENT']:.2f} ₽\n"
+            f"    ⤷ Результаты = {mv['RESULTS']:.0f} | {mv['RESULT_COST']:.2f} ₽\n"
+            f"    ⤷ Клики = {mv['CLICKS']:.0f} | {mv['CLICK_COST']:.2f} ₽"
         )
 
     # 2) ENABLE для blocked (только те, что мы отключали)
@@ -1371,11 +1372,14 @@ def process_cabinet(
         
         # история: только дописываем
         append_history(his_path, rec)
-
+        mv = metric_value_from_stats(stats_all)
+        
         notify_enabled.append(
             f"<b>{name}</b> #{bid}\n"
-            f"    ⤷ Потрачено(all) = {mv['SPENT']:.2f} ₽ | Доход(all) = {income_all:.2f} ₽\n"
-            f"    ⤷ Результаты(all) = {mv['RESULTS']:.0f} | CPA(all) = {mv['RESULT_COST']:.2f} ₽ | CPC(all) = {mv['CLICK_COST']:.2f} ₽"
+            f"    ⤷ Потрачено = {mv['SPENT']:.2f} ₽\n"
+            f"    ⤷ Доход = {income_all:.2f} ₽\n"
+            f"    ⤷ Результаты = {mv['RESULTS']:.0f} | {mv['RESULT_COST']:.2f} ₽\n"
+            f"    ⤷ Клики = {mv['CLICKS']:.0f} | {mv['CLICK_COST']:.2f} ₽"
         )
 
     save_disabled_records(dis_path, disabled_records)
@@ -1435,9 +1439,7 @@ def main() -> None:
             settings = load_user_settings(users_root, tg_id)
             ignore_manual_enabled_ads = bool(settings.get("ignore_manual_enabled_ads", False))
 
-            chat_id = cfg.get("chat_id")
-            if chat_id is not None:
-                chat_id = str(chat_id)
+            chat_id = str(tg_id)
 
             income_path = str(cfg.get("income_path") or "").strip()
             income_store = load_income_store(income_path) if income_path else IncomeStore(total={}, by_day={})
