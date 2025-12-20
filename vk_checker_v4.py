@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.0-"
+VERSION = "-4.1.1-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -633,16 +633,28 @@ def metric_value_from_stats(stats: Dict[str, Any]) -> Dict[str, float]:
     }
 
 def period_to_label(period: Dict[str, Any]) -> str:
-    """Красивое описание периода + датный диапазон."""
+    """Человеческое описание периода + (если нужно) диапазон дат."""
     ptype = (period or {}).get("type", "ALL_TIME")
     dr = daterange_from_period(period)
-    if dr is None:
-        return "ALL_TIME"
+
+    if ptype == "ALL_TIME":
+        return "Период: за всё время"
+
+    if not dr:
+        return f"Период: {ptype}"
+
     date_from, date_to = dr
     if ptype == "LAST_N_DAYS":
         n = int((period or {}).get("n", 1) or 1)
-        return f"LAST_N_DAYS(n={n}) [{date_from}..{date_to}]"
-    return f"{ptype} [{date_from}..{date_to}]"
+        return f"Период: последние {n} дн. ({date_from}..{date_to})"
+
+    if ptype == "TODAY":
+        return f"Период: сегодня ({date_from})"
+
+    if ptype == "YESTERDAY":
+        return f"Период: вчера ({date_from})"
+
+    return f"Период: {ptype} ({date_from}..{date_to})"
 
 
 def log_banner_stats(
@@ -794,11 +806,15 @@ def eval_conditions(
     return True
 
 
-def eval_cost_rule(rule: Dict[str, Any], banner_id: int, stats_by_period: Dict[str, Dict[int, Dict[str, Any]]]) -> Tuple[bool, str]:
+def eval_cost_rule(
+    rule: Dict[str, Any],
+    banner_id: int,
+    stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
+) -> Tuple[bool, str, str]:
     if not isinstance(rule, dict):
-        return False, ""
+        return False, "", ""
     if (rule.get("type") or "").upper() != "COST_RULE":
-        return False, ""
+        return False, "", ""
 
     spent_rub = safe_float(rule.get("spentRub", 0))
     metric = (rule.get("metric") or "").upper()
@@ -811,21 +827,24 @@ def eval_cost_rule(rule: Dict[str, Any], banner_id: int, stats_by_period: Dict[s
     mv = metric_value_from_stats(stats)
 
     if mv["SPENT"] < spent_rub:
-        return False, ""
+        return False, "", ""
 
     if metric not in mv:
-        return False, ""
+        return False, "", ""
 
-    ok = op_compare(mv[metric], op, value)
+    actual = float(mv[metric])
+    ok = op_compare(actual, op, value)
     if not ok:
-        return False, ""
+        return False, "", ""
 
-    # причина
     reason = (
         f"{metric_to_human(metric)} {op_to_human(op)} {value:.2f} "
-        f"при расходе ≥ {spent_rub:.2f} (период {period_to_label(period)})"
+        f"при расходе ≥ {spent_rub:.2f}. {period_to_label(period)}."
     )
-    return True, reason
+
+    short_reason = f"{metric_to_human(metric)} {actual:.2f} {op_to_human(op)} {value:.2f}"
+
+    return True, reason, short_reason
 
 
 def eval_filter_node(
@@ -835,7 +854,7 @@ def eval_filter_node(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     if not isinstance(node, dict):
         return "NOOP", ""
 
@@ -855,7 +874,7 @@ def eval_filter_node(
             child = node.get("child")
             return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
-    rule_hits: List[Tuple[bool, str]] = []
+    rule_hits: List[Tuple[bool, str, str]] = []
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
@@ -873,16 +892,20 @@ def eval_filter_node(
     if matched:
         # причина
         reasons = [x[1] for x in rule_hits if x[0] and x[1]]
+        short_reasons = [x[2] for x in rule_hits if x[0] and x[2]]
+        
         if mode == "ANY":
             reason = reasons[0] if reasons else ""
+            short_reason = short_reasons[0] if short_reasons else ""
         else:
             reason = "; ".join(reasons) if reasons else ""
+            short_reason = "; ".join(short_reasons) if short_reasons else ""
 
         action = node.get("action") or {}
         if isinstance(action, dict) and (action.get("type") or "").upper() == "SET_STATE":
             state = (action.get("state") or "NOOP").upper()
             if state in ("DISABLE", "ENABLE", "NOOP"):
-                return state, reason
+                return state, reason, short_reason
         return "NOOP", ""
 
     child = node.get("child")
@@ -897,7 +920,7 @@ def decide_action_for_banner(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     ordered = sorted(
         [t for t in templates if isinstance(t, dict)],
         key=lambda x: int(x.get("priority", 9999) or 9999),
@@ -918,15 +941,16 @@ def decide_action_for_banner(
                 continue
 
         child = root.get("child") or {}
-        state, reason = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+        state, reason, short_reason = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
         if state and state.upper() != "NOOP":
-            # добавим в причину название шаблона, чтобы человеку было понятно
             tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
             if tpl_name:
                 reason = f"[{tpl_name}] {reason}".strip()
-            return state.upper(), reason
+                if short_reason:
+                    short_reason = f"[{tpl_name}] {short_reason}".strip()
+            return state.upper(), reason, short_reason
 
-    return "NOOP", ""
+    return "NOOP", "", ""
 
 
 # ============================================================
@@ -1007,6 +1031,7 @@ def make_banner_record(
     status: str,
     checker_enabled: str,
     reason: str,
+    short_reason: str
 ) -> Dict[str, str]:
     mv = metric_value_from_stats(stats_all_time or {})
     return {
@@ -1015,6 +1040,7 @@ def make_banner_record(
         "name_banner": name or "",
         "url": url or "",
         "reason": reason or "",
+        "short_reason": short_reason or "",
         "status": status,
         "checker_enabled": checker_enabled,
         "spent_all_time": f"{mv['SPENT']:.2f}",
@@ -1240,7 +1266,7 @@ def process_cabinet(
         
         bobj = active_by_id.get(bid, {})
 
-        state, reason = decide_action_for_banner(
+        state, reason, short_reason = decide_action_for_banner(
             templates=templates,
             cabinet_id=cabinet_id,
             banner_id=bid,
@@ -1273,6 +1299,7 @@ def process_cabinet(
             status="off",
             checker_enabled="on",
             reason=reason or "Отключено фильтром",
+            short_reason=short_reason or "",
         )
         
         disabled_records[str(bid)] = rec
@@ -1303,7 +1330,7 @@ def process_cabinet(
         
         bobj = blocked_by_id.get(bid, {})
 
-        state, reason = decide_action_for_banner(
+        state, reason, short_reason = decide_action_for_banner(
             templates=templates,
             cabinet_id=cabinet_id,
             banner_id=bid,
@@ -1327,8 +1354,9 @@ def process_cabinet(
         rec = make_banner_record(
             bid, name, url, stats_all,
             status="on",
-            checker_enabled="on",   # требование: если включен фильтром -> on
+            checker_enabled="on",
             reason=reason or "Включено фильтром",
+            short_reason=short_reason or "",
         )
         
         # переносим между списками
