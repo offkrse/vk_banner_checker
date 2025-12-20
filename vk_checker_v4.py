@@ -946,8 +946,6 @@ def decide_action_for_banner(
             tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
             if tpl_name:
                 reason = f"[{tpl_name}] {reason}".strip()
-                if short_reason:
-                    short_reason = f"[{tpl_name}] {short_reason}".strip()
             return state.upper(), reason, short_reason
 
     return "NOOP", "", ""
