@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.0-"
+VERSION = "-4.0.1-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -29,7 +29,6 @@ RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
 
 DEFAULT_MAX_DISABLES_PER_RUN = 15
-
 DEFAULT_USERS_ROOT = os.environ.get("VK_CHECKER_USERS_ROOT", "/opt/vk_checker/v4/users")
 
 # ============================================================
@@ -47,7 +46,6 @@ logger = logging.getLogger("vk_checker_v4")
 # Утилиты
 # ============================================================
 def load_env() -> None:
-    # .env нужен только для TG_BOT_TOKEN и (опционально) VK_ADS_BASE_URL
     try:
         load_dotenv()
     except Exception:
@@ -84,7 +82,6 @@ def req_with_retry(
         try:
             resp = requests.request(method, url, headers=headers, params=params, json=json_body, timeout=timeout)
 
-            # VK rate limit
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", "3"))
                 logger.warning(f"⚠️ VK API rate limit (429). Пауза {retry_after}s перед повтором...")
@@ -129,12 +126,7 @@ def tg_notify(bot_token: str, chat_id: str, text: str, dry_run: bool) -> None:
 
 
 # ============================================================
-# Income loader (из пути, который лежит в <tg_id>.json -> income_path)
-# Формат ожидается как раньше:
-# [
-#   {"day": "20.12.2025", "data": {"123": 10.5, "124": 0}},
-#   ...
-# ]
+# Income loader
 # ============================================================
 @dataclass
 class IncomeStore:
@@ -165,13 +157,12 @@ class IncomeStore:
                 s += safe_float(self.by_day.get(key, {}).get(bid, 0.0))
             return s
 
-        # неизвестный период — безопасно: как 0
         return 0.0
 
 
 def load_income_store(path: str) -> IncomeStore:
     if not path or not os.path.exists(path):
-        logger.warning(f"⚠️ Файл доходов {path} не найден — фильтр дохода фактически будет нулевой")
+        logger.warning(f"⚠️ Файл доходов {path} не найден — доход будет считаться 0")
         return IncomeStore(total={}, by_day={})
 
     try:
@@ -222,11 +213,9 @@ class VkAdsApi:
             "Accept": "application/json",
         }
         self.banner_info_cache: Dict[int, Dict[str, Any]] = {}
+        self.banner_objective_cache: Dict[int, str] = {}  # banner_id -> objective
 
     def list_banners_by_status(self, status: str, limit: int = 1000) -> List[Dict[str, Any]]:
-        """
-        status: "active" | "blocked" | ...
-        """
         url = f"{self.base_url}/api/v2/banners.json"
         offset = 0
         items: List[Dict[str, Any]] = []
@@ -271,7 +260,7 @@ class VkAdsApi:
                     continue
 
                 info = self.banner_info_cache.get(bid, {})
-                for k in ("name", "created", "url", "link_url", "destination_url"):
+                for k in ("name", "created", "url", "link_url", "destination_url", "ad_group_id"):
                     if k in it and it.get(k) is not None:
                         info[k] = it.get(k)
 
@@ -321,7 +310,6 @@ class VkAdsApi:
             base = (total.get("base", {}) or {}).copy()
             vk = base.get("vk", {}) or {}
 
-            # В разных кабинетах/версиях могут быть разные поля — достаём максимально мягко
             spent = safe_float(base.get("spent", 0))
             cpc = safe_float(base.get("cpc", 0))
             clicks = safe_float(base.get("clicks", base.get("clicks_count", 0)))
@@ -415,19 +403,54 @@ class VkAdsApi:
             logger.error(f"Ошибка при включении баннера {banner_id}: {e}")
             return False
 
+    def build_banner_objectives_cache(self) -> Dict[int, str]:
+        """
+        TARGET_ACTION хранится на уровне групп:
+        GET /api/v2/ad_groups.json?_status=active&limit=200&fields=id,banners,objective&offset=...
+        Строим mapping banner_id -> objective.
+        """
+        if self.banner_objective_cache:
+            return self.banner_objective_cache
+
+        url = f"{self.base_url}/api/v2/ad_groups.json"
+        limit = 200
+        offset = 0
+        mapping: Dict[int, str] = {}
+
+        while True:
+            params = {
+                "_status": "active",
+                "limit": limit,
+                "offset": offset,
+                "fields": "id,banners,objective",
+            }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            items = data.get("items", []) or []
+
+            for g in items:
+                objective = (g.get("objective") or "").strip()
+                banners = g.get("banners", []) or []
+                if not isinstance(banners, list):
+                    continue
+                for b in banners:
+                    try:
+                        bid = int(b.get("id"))
+                    except Exception:
+                        continue
+                    mapping[bid] = objective
+
+            if len(items) < limit:
+                break
+            offset += limit
+
+        self.banner_objective_cache = mapping
+        logger.info(f"✅ Загружены objective по группам: banners_with_objective={len(mapping)}")
+        return mapping
+
 
 # ============================================================
-# Filters engine (парсим filters.json из UI)
-# Схема (по zip/UI):
-# templates: [{id, name, priority, root:{type:"ROOT", accountsScope:{mode:"ALL"|...}, conditions:[...], child:{type:"FILTER", mode:"ALL|ANY", rules:[...], action:{type:"SET_STATE", state:"DISABLE|ENABLE|NOOP"}, child:...}}]
-#
-# conditions:
-#  - {type:"SPENT", period:{type:"ALL_TIME|TODAY|YESTERDAY|LAST_N_DAYS", n?}, op:"LT|LTE|EQ|GTE|GT", valueRub:number}
-#  - {type:"INCOME", period:{...}, mode:"HAS"|... }  (поддерживаем HAS/NONE + опционально op/valueRub)
-#  - {type:"TARGET_ACTION", target:"BOT_MESSAGE"|...}
-#
-# rules:
-#  - {type:"COST_RULE", spentRub:number, metric:"RESULTS|CLICKS|RESULT_COST|CLICK_COST", op:"LT|LTE|EQ|GTE|GT", value:number}
+# Filters engine
 # ============================================================
 def op_compare(left: float, op: str, right: float) -> bool:
     op = (op or "").upper()
@@ -441,7 +464,6 @@ def op_compare(left: float, op: str, right: float) -> bool:
         return left >= right
     if op == "GT":
         return left > right
-    # неизвестный оператор — безопасно: false
     return False
 
 
@@ -468,16 +490,12 @@ def daterange_from_period(period: Dict[str, Any]) -> Optional[Tuple[str, str]]:
 
 
 def metric_value_from_stats(stats: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Нормализуем в набор метрик, чтобы COST_RULE мог работать стабильно.
-    """
     spent = safe_float(stats.get("spent", 0))
     clicks = safe_float(stats.get("clicks", 0))
     goals = safe_float(stats.get("goals", 0))
     cpc = safe_float(stats.get("cpc", 0))
     vk_cpa = safe_float(stats.get("vk.cpa", 0))
 
-    # Подстраховки: если VK не вернул cost-метрики, можно посчитать
     click_cost = cpc if cpc > 0 else (spent / clicks if clicks > 0 else 0.0)
     result_cost = vk_cpa if vk_cpa > 0 else (spent / goals if goals > 0 else 0.0)
 
@@ -493,18 +511,13 @@ def metric_value_from_stats(stats: Dict[str, Any]) -> Dict[str, float]:
 
 
 def extract_templates(filters_json: Any) -> List[Dict[str, Any]]:
-    """
-    Возвращает templates[] в максимально мягком режиме, чтобы не упасть на разной структуре.
-    """
     if isinstance(filters_json, dict):
         tpls = filters_json.get("templates")
         if isinstance(tpls, list):
             return [t for t in tpls if isinstance(t, dict)]
-        # иногда может быть один root
         if "root" in filters_json:
-            return [filters_json]  # трактуем как "один шаблон"
+            return [filters_json]
     if isinstance(filters_json, list):
-        # если уже список шаблонов
         return [t for t in filters_json if isinstance(t, dict)]
     return []
 
@@ -520,17 +533,24 @@ def accounts_scope_allows(accounts_scope: Dict[str, Any], cabinet_id: str) -> bo
         if isinstance(selected, list):
             return str(cabinet_id) in {str(x) for x in selected}
         return False
-    # неизвестный mode — безопасно: не применяем
     return False
 
 
-def banner_target_action(banner_obj: Dict[str, Any]) -> str:
-    # Best-effort (VK разные поля может отдавать по-разному)
-    for k in ("target", "target_action", "objective", "optimization_goal", "goal_type"):
-        v = banner_obj.get(k)
-        if isinstance(v, str) and v:
-            return v
-    return ""
+def objective_to_target_action(objective: str) -> str:
+    obj = (objective or "").strip()
+    if obj == "socialengagement":
+        return "BOT_MESSAGE"
+    if obj == "site_conversions":
+        return "SITE"
+    if obj == "leadads":
+        return "LEADFORM"
+    # всё остальное
+    return "APP"
+
+
+def banner_target_action_from_groups(banner_id: int, banner_objectives: Dict[int, str]) -> str:
+    objective = banner_objectives.get(int(banner_id), "")
+    return objective_to_target_action(objective)
 
 
 def eval_conditions(
@@ -539,10 +559,8 @@ def eval_conditions(
     banner_obj: Dict[str, Any],
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
+    banner_objectives: Dict[int, str],
 ) -> bool:
-    """
-    Все условия интерпретируем как AND.
-    """
     for cond in conditions or []:
         if not isinstance(cond, dict):
             continue
@@ -571,26 +589,23 @@ def eval_conditions(
                 if income > 0:
                     return False
             else:
-                # если у режима есть op/valueRub — попробуем сравнить
                 op = cond.get("op")
                 if op:
                     value = safe_float(cond.get("valueRub", 0))
                     if not op_compare(income, op, value):
                         return False
                 else:
-                    # неизвестный режим без сравнения — безопасно: условие не пройдено
                     return False
 
         elif ctype == "TARGET_ACTION":
             target = (cond.get("target") or "").strip()
             if not target:
                 continue
-            actual = banner_target_action(banner_obj)
+            actual = banner_target_action_from_groups(banner_id, banner_objectives)
             if actual != target:
                 return False
 
         else:
-            # неизвестное условие — безопасно: не проходим
             return False
 
     return True
@@ -601,9 +616,6 @@ def eval_cost_rule(
     banner_id: int,
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
 ) -> bool:
-    """
-    COST_RULE: spentRub + (metric op value)
-    """
     if not isinstance(rule, dict):
         return False
     if (rule.get("type") or "").upper() != "COST_RULE":
@@ -614,7 +626,6 @@ def eval_cost_rule(
     op = (rule.get("op") or "EQ").upper()
     value = safe_float(rule.get("value", 0))
 
-    # В COST_RULE в UI период, судя по коду, может отсутствовать => считаем по ALL_TIME
     period = rule.get("period") or {"type": "ALL_TIME"}
     key = json.dumps(period, sort_keys=True, ensure_ascii=False)
     stats = stats_by_period.get(key, {}).get(banner_id, {}) or {}
@@ -623,9 +634,7 @@ def eval_cost_rule(
     if mv["SPENT"] < spent_rub:
         return False
 
-    # Маппинг метрики
     if metric not in mv:
-        # неизвестная метрика — безопасно: не матч
         return False
 
     return op_compare(mv[metric], op, value)
@@ -637,42 +646,34 @@ def eval_filter_node(
     banner_obj: Dict[str, Any],
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
+    banner_objectives: Dict[int, str],
 ) -> str:
-    """
-    Возвращает state: DISABLE / ENABLE / NOOP
-    Логика: если node матчится, возвращаем его action.state, иначе идём в child.
-    """
     if not isinstance(node, dict):
         return "NOOP"
 
     ntype = (node.get("type") or "").upper()
     if ntype != "FILTER":
-        # если вдруг это ещё один ROOT/неизвестное — пытаемся провалиться в child
         child = node.get("child")
-        return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store)
+        return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
-    mode = (node.get("mode") or "ALL").upper()  # ALL=AND, ANY=OR
+    mode = (node.get("mode") or "ALL").upper()
     rules = node.get("rules") or []
     if not isinstance(rules, list):
         rules = []
 
-    # Поддержим также conditions внутри FILTER (на всякий случай)
     conditions = node.get("conditions") or []
     if isinstance(conditions, list) and conditions:
-        if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store):
-            # не прошли условия фильтра — значит фильтр не матчится
+        if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
             child = node.get("child")
-            return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store)
+            return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
     rule_results: List[bool] = []
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             rule_results.append(eval_cost_rule(r, banner_id, stats_by_period))
         else:
-            # неизвестное правило — считаем false (чтобы случайно не матчить)
             rule_results.append(False)
 
-    matched = False
     if not rule_results:
         matched = False
     elif mode == "ANY":
@@ -686,11 +687,10 @@ def eval_filter_node(
             state = (action.get("state") or "NOOP").upper()
             if state in ("DISABLE", "ENABLE", "NOOP"):
                 return state
-        # если action неизвестный — NOOP
         return "NOOP"
 
     child = node.get("child")
-    return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store)
+    return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
 
 def decide_action_for_banner(
@@ -700,16 +700,8 @@ def decide_action_for_banner(
     banner_obj: Dict[str, Any],
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
+    banner_objectives: Dict[int, str],
 ) -> str:
-    """
-    templates сортируются по priority (меньше — выше).
-    Для каждого template:
-      - accountsScope должен позволять кабинет
-      - root.conditions должны быть true
-      - дальше идём в root.child и получаем state
-    Берём первый state != NOOP
-    """
-    # сортировка по priority, fallback=9999
     ordered = sorted(
         [t for t in templates if isinstance(t, dict)],
         key=lambda x: int(x.get("priority", 9999) or 9999),
@@ -726,11 +718,11 @@ def decide_action_for_banner(
 
         conditions = root.get("conditions") or []
         if isinstance(conditions, list) and conditions:
-            if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store):
+            if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
                 continue
 
         child = root.get("child") or {}
-        state = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store)
+        state = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
         if state and state.upper() != "NOOP":
             return state.upper()
 
@@ -739,9 +731,6 @@ def decide_action_for_banner(
 
 # ============================================================
 # disabled_banners.json per cabinet
-# Формат хранения: список объектов (каждый объект как вы просили).
-# Upsert по id_banner.
-# При ENABLE удаляем запись.
 # ============================================================
 def disabled_file_path(users_root: str, tg_id: str, cabinet_id: str) -> pathlib.Path:
     p = pathlib.Path(users_root) / str(tg_id) / str(cabinet_id)
@@ -756,7 +745,6 @@ def load_disabled_records(path: pathlib.Path) -> Dict[str, Dict[str, str]]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            # если кто-то сохранил как dict — нормализуем
             out: Dict[str, Dict[str, str]] = {}
             for k, v in data.items():
                 if isinstance(v, dict):
@@ -779,7 +767,6 @@ def load_disabled_records(path: pathlib.Path) -> Dict[str, Dict[str, str]]:
 
 def save_disabled_records(path: pathlib.Path, records: Dict[str, Dict[str, str]]) -> None:
     try:
-        # сохраняем как список объектов (по ТЗ)
         arr = list(records.values())
         with open(path, "w", encoding="utf-8") as f:
             json.dump(arr, f, ensure_ascii=False, indent=2)
@@ -794,8 +781,7 @@ def make_disabled_record(
     stats_all_time: Dict[str, Any],
 ) -> Dict[str, str]:
     mv = metric_value_from_stats(stats_all_time or {})
-    # goals_all_time = RESULTS, clicks_all_time = CLICKS
-    rec = {
+    return {
         "daytime": now_str(),
         "id_banner": str(banner_id),
         "name_banner": name or "",
@@ -806,19 +792,10 @@ def make_disabled_record(
         "clicks_all_time": f"{mv['CLICKS']:.0f}",
         "cpc_all_time": f"{mv['CLICK_COST']:.2f}",
     }
-    return rec
 
 
 # ============================================================
-# User config loader
-# /opt/vk_checker/v4/users/<tg_id>/<tg_id>.json
-# ожидаем хотя бы:
-# {
-#   "tg_id": "...",
-#   "chat_id": "...",
-#   "income_path": "...",
-#   "accounts": [{"id":"CAB1","name":"MAIN","token":"..."}]
-# }
+# User config + settings loader
 # ============================================================
 def load_user_config(users_root: str, tg_id: str) -> Dict[str, Any]:
     path = pathlib.Path(users_root) / str(tg_id) / f"{tg_id}.json"
@@ -829,6 +806,20 @@ def load_user_config(users_root: str, tg_id: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Некорректный формат {path}: ожидался JSON object")
     return data
+
+
+def load_user_settings(users_root: str, tg_id: str) -> Dict[str, Any]:
+    path = pathlib.Path(users_root) / str(tg_id) / "settings.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.error(f"Ошибка чтения settings.json ({path}): {e}")
+    return {}
 
 
 def load_user_filters(users_root: str, tg_id: str) -> List[Dict[str, Any]]:
@@ -854,14 +845,12 @@ def discover_users(users_root: str) -> List[str]:
     out: List[str] = []
     for child in p.iterdir():
         if child.is_dir():
-            name = child.name
-            # tg id обычно цифры; но не будем жёстко ограничивать
-            out.append(name)
+            out.append(child.name)
     return sorted(out)
 
 
 # ============================================================
-# Сбор нужных периодов из filters.json
+# Сбор периодов из filters.json
 # ============================================================
 def collect_periods_from_filters(templates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     periods: List[Dict[str, Any]] = [{"type": "ALL_TIME"}]
@@ -885,7 +874,6 @@ def collect_periods_from_filters(templates: List[Dict[str, Any]]) -> List[Dict[s
 
     walk_node(templates)
 
-    # unique by json key
     uniq: Dict[str, Dict[str, Any]] = {}
     for p in periods:
         key = json.dumps(p, sort_keys=True, ensure_ascii=False)
@@ -895,23 +883,17 @@ def collect_periods_from_filters(templates: List[Dict[str, Any]]) -> List[Dict[s
 
 
 # ============================================================
-# Processing one cabinet
+# Stats cache
 # ============================================================
 def build_stats_cache(
     api: VkAdsApi,
     banner_ids: List[int],
     periods: List[Dict[str, Any]],
 ) -> Dict[str, Dict[int, Dict[str, Any]]]:
-    """
-    Возвращает:
-      key(period_json) -> {banner_id -> stats}
-    где stats в формате metric_value_from_stats ожидает keys: spent, cpc, clicks, goals, vk.cpa
-    """
     out: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
     for period in periods:
         key = json.dumps(period, sort_keys=True, ensure_ascii=False)
-
         dr = daterange_from_period(period)
         if dr is None:
             out[key] = api.stats_summary_banners(banner_ids)
@@ -922,6 +904,9 @@ def build_stats_cache(
     return out
 
 
+# ============================================================
+# Processing one cabinet
+# ============================================================
 def process_cabinet(
     *,
     users_root: str,
@@ -933,6 +918,7 @@ def process_cabinet(
     cabinet: Dict[str, Any],
     dry_run: bool,
     max_disables: int,
+    ignore_manual_enabled_ads: bool,
 ) -> None:
     cabinet_id = str(cabinet.get("id") or "").strip()
     cabinet_name = str(cabinet.get("name") or cabinet_id or "CABINET").strip()
@@ -943,11 +929,10 @@ def process_cabinet(
         return
 
     logger.info("=" * 80)
-    logger.info(f"[USER {tg_id}] CABINET: {cabinet_name} (id={cabinet_id})")
+    logger.info(f"[USER {tg_id}] CABINET: {cabinet_name} (id={cabinet_id}) | ignore_manual_enabled_ads={ignore_manual_enabled_ads}")
 
     api = VkAdsApi(token=token, base_url=BASE_URL, dry_run=dry_run)
 
-    # Загружаем список баннеров
     active_banners = api.list_banners_by_status("active")
     blocked_banners = api.list_banners_by_status("blocked")
 
@@ -959,18 +944,17 @@ def process_cabinet(
         logger.info("Баннеров не найдено")
         return
 
-    # Кешируем имя/created/url (по необходимости)
-    api.fetch_banners_info(all_ids, fields="created,name,url,link_url,destination_url")
+    api.fetch_banners_info(all_ids, fields="created,name,url,link_url,destination_url,ad_group_id")
 
-    # Какие периоды вообще нужны по filters.json
+    # Важно: цель (TARGET_ACTION) берём по ad_groups objective
+    banner_objectives = api.build_banner_objectives_cache()
+
     periods = collect_periods_from_filters(templates)
     stats_by_period = build_stats_cache(api, all_ids, periods)
 
-    # disabled_banners.json
     dis_path = disabled_file_path(users_root, tg_id, cabinet_id)
     disabled_records = load_disabled_records(dis_path)
 
-    # Быстрый доступ к объекту баннера по id (active/blocked)
     active_by_id: Dict[int, Dict[str, Any]] = {}
     blocked_by_id: Dict[int, Dict[str, Any]] = {}
     for b in active_banners:
@@ -988,8 +972,14 @@ def process_cabinet(
     notify_disabled: List[str] = []
     notify_enabled: List[str] = []
 
-    # 1) Отключаем активные, если правило говорит DISABLE
+    # 1) DISABLE для активных
     for bid in active_ids:
+        # НОВОЕ: если баннер уже в disabled_banners.json и включили руками,
+        # то при ignore_manual_enabled_ads=true мы его не отключаем повторно
+        if ignore_manual_enabled_ads and str(bid) in disabled_records:
+            logger.info(f"▶ Пропускаем баннер {bid}: already in disabled_banners.json и ignore_manual_enabled_ads=true")
+            continue
+
         bobj = active_by_id.get(bid, {})
 
         state = decide_action_for_banner(
@@ -999,6 +989,7 @@ def process_cabinet(
             banner_obj=bobj,
             stats_by_period=stats_by_period,
             income_store=income_store,
+            banner_objectives=banner_objectives,
         )
 
         if state != "DISABLE":
@@ -1019,7 +1010,6 @@ def process_cabinet(
         stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
         stats_all = (stats_by_period.get(stats_all_key, {}) or {}).get(bid, {}) or {}
 
-        # upsert record
         rec = make_disabled_record(bid, name, url, stats_all)
         disabled_records[str(bid)] = rec
 
@@ -1031,13 +1021,13 @@ def process_cabinet(
             f"    ⤷ Результаты(all) = {mv['RESULTS']:.0f} | CPA(all) = {mv['RESULT_COST']:.2f} ₽ | CPC(all) = {mv['CLICK_COST']:.2f} ₽"
         )
 
-    # 2) Включаем обратно заблокированные, если правило говорит ENABLE,
-    #    но включаем ТОЛЬКО те, что есть в disabled_banners.json (то есть мы отключали их сами)
+    # 2) ENABLE для blocked (только те, что мы отключали)
     for bid in blocked_ids:
         if str(bid) not in disabled_records:
             continue
 
         bobj = blocked_by_id.get(bid, {})
+
         state = decide_action_for_banner(
             templates=templates,
             cabinet_id=cabinet_id,
@@ -1045,6 +1035,7 @@ def process_cabinet(
             banner_obj=bobj,
             stats_by_period=stats_by_period,
             income_store=income_store,
+            banner_objectives=banner_objectives,
         )
 
         if state != "ENABLE":
@@ -1060,7 +1051,6 @@ def process_cabinet(
         mv = metric_value_from_stats(stats_all)
         income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
 
-        # remove record
         disabled_records.pop(str(bid), None)
 
         notify_enabled.append(
@@ -1069,11 +1059,9 @@ def process_cabinet(
             f"    ⤷ Результаты(all) = {mv['RESULTS']:.0f} | CPA(all) = {mv['RESULT_COST']:.2f} ₽ | CPC(all) = {mv['CLICK_COST']:.2f} ₽"
         )
 
-    # сохраняем disabled_banners.json (в формате списка объектов)
     save_disabled_records(dis_path, disabled_records)
     logger.info(f"💾 disabled_banners.json обновлён: {dis_path} (records={len(disabled_records)})")
 
-    # TG уведомления
     if tg_bot_token and chat_id:
         if notify_disabled:
             text = f"<b>[{cabinet_name}]</b>\n<b>Отключены баннеры:</b>\n\n" + "\n\n".join(notify_disabled)
@@ -1119,8 +1107,10 @@ def main() -> None:
 
     for tg_id in users:
         try:
-            # config
             cfg = load_user_config(users_root, tg_id)
+            settings = load_user_settings(users_root, tg_id)
+            ignore_manual_enabled_ads = bool(settings.get("ignore_manual_enabled_ads", False))
+
             chat_id = cfg.get("chat_id")
             if chat_id is not None:
                 chat_id = str(chat_id)
@@ -1128,13 +1118,11 @@ def main() -> None:
             income_path = str(cfg.get("income_path") or "").strip()
             income_store = load_income_store(income_path) if income_path else IncomeStore(total={}, by_day={})
 
-            # filters
             templates = load_user_filters(users_root, tg_id)
             if not templates:
                 logger.info(f"[USER {tg_id}] Нет активных фильтров — пропуск (ничего делать не будем)")
                 continue
 
-            # cabinets
             accounts = cfg.get("accounts") or cfg.get("cabinets") or []
             if not isinstance(accounts, list) or not accounts:
                 logger.warning(f"[USER {tg_id}] В конфиге нет accounts/cabinets — пропуск")
@@ -1143,7 +1131,6 @@ def main() -> None:
             for cab in accounts:
                 if not isinstance(cab, dict):
                     continue
-                # если есть active=false — пропускаем
                 if cab.get("active") is False:
                     continue
 
@@ -1158,6 +1145,7 @@ def main() -> None:
                         cabinet=cab,
                         dry_run=dry_run,
                         max_disables=max_disables,
+                        ignore_manual_enabled_ads=ignore_manual_enabled_ads,
                     )
                 except Exception as e:
                     logger.exception(f"[USER {tg_id}] Ошибка обработки кабинета {cab.get('name') or cab.get('id')}: {e}")
