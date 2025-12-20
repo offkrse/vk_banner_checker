@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.0.5-"
+VERSION = "-4.0.6-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -608,6 +608,66 @@ def metric_value_from_stats(stats: Dict[str, Any]) -> Dict[str, float]:
         "CPA": result_cost,
     }
 
+def period_to_label(period: Dict[str, Any]) -> str:
+    """Красивое описание периода + датный диапазон."""
+    ptype = (period or {}).get("type", "ALL_TIME")
+    dr = daterange_from_period(period)
+    if dr is None:
+        return "ALL_TIME"
+    date_from, date_to = dr
+    if ptype == "LAST_N_DAYS":
+        n = int((period or {}).get("n", 1) or 1)
+        return f"LAST_N_DAYS(n={n}) [{date_from}..{date_to}]"
+    return f"{ptype} [{date_from}..{date_to}]"
+
+
+def log_banner_stats(
+    banner_id: int,
+    periods: List[Dict[str, Any]],
+    stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
+    income_store: IncomeStore,
+    target_action: str = "",
+) -> None:
+    """Печатает статистику баннера по ALL_TIME и всем периодам из filters.json."""
+    all_time_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
+
+    # ALL_TIME
+    s_all = (stats_by_period.get(all_time_key, {}) or {}).get(banner_id, {}) or {}
+    mv_all = metric_value_from_stats(s_all)
+    inc_all = income_store.income_for_period(banner_id, {"type": "ALL_TIME"})
+
+    ta_txt = f" target_action={target_action}" if target_action else ""
+    logger.info(
+        f"[BANNER {banner_id}]{ta_txt} ALL_TIME: "
+        f"spent_all_time={mv_all['SPENT']:.2f} "
+        f"cpa_all_time={mv_all['RESULT_COST']:.2f} "
+        f"cpc_all_time={mv_all['CLICK_COST']:.2f} "
+        f"clicks_all_time={mv_all['CLICKS']:.0f} "
+        f"results_all_time={mv_all['RESULTS']:.0f} "
+        f"income_all_time={inc_all:.2f}"
+    )
+
+    # Остальные периоды из filters.json
+    for p in periods:
+        if not isinstance(p, dict):
+            continue
+        if (p.get("type") or "ALL_TIME") == "ALL_TIME":
+            continue
+
+        key = json.dumps(p, sort_keys=True, ensure_ascii=False)
+        s = (stats_by_period.get(key, {}) or {}).get(banner_id, {}) or {}
+        mv = metric_value_from_stats(s)
+        inc = income_store.income_for_period(banner_id, p)
+
+        logger.info(
+            f"[BANNER {banner_id}] PERIOD {period_to_label(p)}: "
+            f"spent={mv['SPENT']:.2f} "
+            f"cpa={mv['RESULT_COST']:.2f} "
+            f"cpc={mv['CLICK_COST']:.2f} "
+            f"clicks={mv['CLICKS']:.0f} "
+            f"results={mv['RESULTS']:.0f} "
+            f"income={inc:.2f}"
+        )
 
 def extract_templates(filters_json: Any) -> List[Dict[str, Any]]:
     if isinstance(filters_json, dict):
@@ -1089,12 +1149,19 @@ def process_cabinet(
 
     # 1) DISABLE для активных
     for bid in active_ids:
-        # НОВОЕ: если баннер уже в disabled_banners.json и включили руками,
-        # то при ignore_manual_enabled_ads=true мы его не отключаем повторно
         if ignore_manual_enabled_ads and str(bid) in disabled_records:
             logger.info(f"▶ Пропускаем баннер {bid}: already in disabled_banners.json и ignore_manual_enabled_ads=true")
             continue
 
+        ta = banner_target_action_from_groups(bid, banner_objectives)
+        log_banner_stats(
+            banner_id=bid,
+            periods=periods,
+            stats_by_period=stats_by_period,
+            income_store=income_store,
+            target_action=ta,
+        )
+        
         bobj = active_by_id.get(bid, {})
 
         state = decide_action_for_banner(
@@ -1141,6 +1208,15 @@ def process_cabinet(
         if str(bid) not in disabled_records:
             continue
 
+        ta = banner_target_action_from_groups(bid, banner_objectives)
+        log_banner_stats(
+            banner_id=bid,
+            periods=periods,
+            stats_by_period=stats_by_period,
+            income_store=income_store,
+            target_action=ta,
+        )
+        
         bobj = blocked_by_id.get(bid, {})
 
         state = decide_action_for_banner(
