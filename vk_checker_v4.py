@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.5-"
+VERSION = "-4.1.6-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -28,7 +28,7 @@ WRITE_TIMEOUT = 30
 RETRY_COUNT = 3
 RETRY_BACKOFF = 1.8
 
-DEFAULT_MAX_DISABLES_PER_RUN = 15
+DEFAULT_MAX_DISABLES_PER_RUN = 20
 DEFAULT_USERS_ROOT = os.environ.get("VK_CHECKER_USERS_ROOT", "/opt/vk_checker/v4/users")
 
 # ============================================================
@@ -563,6 +563,83 @@ class VkAdsApi:
         logger.info(f"✅ Загружены objective по группам: groups_with_objective={len(mapping)}")
         return mapping
 
+    def fetch_group_ids_from_campaigns(self, campaign_ids: List[int]) -> List[int]:
+        """
+        /api/v2/ad_plans.json?_status=active&limit=200&_id__in=...&fields=id,name,ad_groups
+        Возвращает список ad_group_id.
+        """
+        uniq = sorted({int(x) for x in campaign_ids if int(x) > 0})
+        if not uniq:
+            return []
+
+        url = f"{self.base_url}/api/v2/ad_plans.json"
+        out: List[int] = []
+        chunk_size = 200
+
+        for i in range(0, len(uniq), chunk_size):
+            chunk = uniq[i:i + chunk_size]
+            params = {
+                "_status": "active",
+                "limit": 200,
+                "_id__in": ",".join(map(str, chunk)),
+                "fields": "id,name,ad_groups",
+            }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            items = data.get("items", []) or []
+
+            for plan in items:
+                ad_groups = plan.get("ad_groups", []) or []
+                if not isinstance(ad_groups, list):
+                    continue
+                for g in ad_groups:
+                    try:
+                        gid = int(g.get("id"))
+                    except Exception:
+                        continue
+                    if gid > 0:
+                        out.append(gid)
+
+        return sorted(set(out))
+
+    def fetch_banner_ids_from_groups(self, group_ids: List[int]) -> List[int]:
+        """
+        /api/v2/ad_groups.json?_status=active&limit=200&_id__in=...&fields=id,name,banners
+        Возвращает список banner_id из banners[].
+        """
+        uniq = sorted({int(x) for x in group_ids if int(x) > 0})
+        if not uniq:
+            return []
+
+        url = f"{self.base_url}/api/v2/ad_groups.json"
+        out: List[int] = []
+        chunk_size = 200
+
+        for i in range(0, len(uniq), chunk_size):
+            chunk = uniq[i:i + chunk_size]
+            params = {
+                "_status": "active",
+                "limit": 200,
+                "_id__in": ",".join(map(str, chunk)),
+                "fields": "id,name,banners",
+            }
+            resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
+            data = resp.json()
+            items = data.get("items", []) or []
+
+            for g in items:
+                banners = g.get("banners", []) or []
+                if not isinstance(banners, list):
+                    continue
+                for b in banners:
+                    try:
+                        bid = int(b.get("id"))
+                    except Exception:
+                        continue
+                    if bid > 0:
+                        out.append(bid)
+
+        return sorted(set(out))
 
 # ============================================================
 # Filters engine
@@ -977,6 +1054,89 @@ def append_history(path: pathlib.Path, record: Dict[str, str]) -> None:
     except Exception as e:
         logger.error(f"Ошибка записи history {path}: {e}")
 
+def notify_state_path(users_root: str, tg_id: str, cabinet_id: str) -> pathlib.Path:
+    p = pathlib.Path(users_root) / str(tg_id) / str(cabinet_id)
+    ensure_dir(p)
+    return p / "notify_state.json"
+
+
+def load_last_notify_utc(path: pathlib.Path) -> Optional[dt.datetime]:
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        s = str(data.get("last_notify_utc") or "").strip()
+        if not s:
+            return None
+        return dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def save_last_notify_utc(path: pathlib.Path, when_utc: dt.datetime) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"last_notify_utc": when_utc.strftime("%Y-%m-%d %H:%M:%S")},
+                      f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка записи notify_state {path}: {e}")
+
+
+def parse_history_daytime_to_utc(daytime_str: str) -> Optional[dt.datetime]:
+    # history хранит daytime в UTC+4
+    try:
+        local_dt = dt.datetime.strptime(daytime_str, "%Y-%m-%d %H:%M:%S")
+        return local_dt - dt.timedelta(hours=4)
+    except Exception:
+        return None
+
+
+def read_history_events_since(history_path: pathlib.Path, since_utc: Optional[dt.datetime]) -> List[Dict[str, Any]]:
+    if not history_path.exists():
+        return []
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, list):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            s = str(item.get("daytime") or "").strip()
+            if not s:
+                continue
+            t_utc = parse_history_daytime_to_utc(s)
+            if not t_utc:
+                continue
+            if since_utc is None or t_utc > since_utc:
+                out.append(item)
+        return out
+    except Exception as e:
+        logger.error(f"Ошибка чтения history {history_path}: {e}")
+        return []
+
+
+def is_due_to_send(last_notify_utc: Optional[dt.datetime], every_min: Optional[int]) -> bool:
+    if not every_min or int(every_min) <= 0:
+        return True
+    if last_notify_utc is None:
+        return True
+    now_utc = dt.datetime.utcnow()
+    return (now_utc - last_notify_utc).total_seconds() >= int(every_min) * 60
+
+
+def reduce_latest_per_banner(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # чтобы не спамить одним баннером много раз за окно — оставим последнее событие
+    last: Dict[str, Dict[str, Any]] = {}
+    for e in events:
+        bid = str(e.get("id_banner") or "").strip()
+        if bid:
+            last[bid] = e
+    return list(last.values())
+
 def load_disabled_records(path: pathlib.Path) -> Dict[str, Dict[str, str]]:
     if not path.exists():
         return {}
@@ -1086,6 +1246,37 @@ def load_user_filters(users_root: str, tg_id: str) -> List[Dict[str, Any]]:
         logger.error(f"Ошибка чтения filters.json ({path}): {e}")
         return []
 
+def load_user_listfile(users_root: str, tg_id: str, filename: str) -> Dict[str, List[str]]:
+    """
+    white_list.json / black_list.json
+    Формат:
+    {
+      "campaign_ids": ["123", "456"],
+      "banner_ids": ["111", "222"]
+    }
+    Файла может не быть / может быть пустым.
+    """
+    path = pathlib.Path(users_root) / str(tg_id) / filename
+    if not path.exists():
+        return {"campaign_ids": [], "banner_ids": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"campaign_ids": [], "banner_ids": []}
+        cids = data.get("campaign_ids") or []
+        bids = data.get("banner_ids") or []
+        if not isinstance(cids, list):
+            cids = []
+        if not isinstance(bids, list):
+            bids = []
+        return {
+            "campaign_ids": [str(x).strip() for x in cids if str(x).strip()],
+            "banner_ids": [str(x).strip() for x in bids if str(x).strip()],
+        }
+    except Exception as e:
+        logger.error(f"Ошибка чтения {path}: {e}")
+        return {"campaign_ids": [], "banner_ids": []}
 
 def discover_users(users_root: str) -> List[str]:
     p = pathlib.Path(users_root)
@@ -1168,6 +1359,12 @@ def process_cabinet(
     dry_run: bool,
     max_disables: int,
     ignore_manual_enabled_ads: bool,
+    tg_notify_enabled: bool,
+    tg_notify_every_min: Optional[int],
+    limit_disabled_banners_20: bool,
+    only_spent_all_time_lte_5000: bool,
+    white_list: Dict[str, List[str]],
+    black_list: Dict[str, List[str]],
 ) -> None:
     cabinet_id = str(cabinet.get("id") or "").strip()
     cabinet_name = str(cabinet.get("name") or cabinet_id or "CABINET").strip()
@@ -1210,7 +1407,38 @@ def process_cabinet(
         return
 
     api.fetch_banners_info(all_ids, fields="created,name,content,ad_group_id")
-
+    # --- WHITE / BLACK LIST ---
+    white_campaign_ids = [int(x) for x in (white_list.get("campaign_ids") or []) if str(x).isdigit()]
+    white_banner_ids_direct = [int(x) for x in (white_list.get("banner_ids") or []) if str(x).isdigit()]
+    
+    black_campaign_ids = [int(x) for x in (black_list.get("campaign_ids") or []) if str(x).isdigit()]
+    black_banner_ids_direct = [int(x) for x in (black_list.get("banner_ids") or []) if str(x).isdigit()]
+    
+    whitelist_set: Optional[set[int]] = None
+    blacklist_set: set[int] = set(black_banner_ids_direct)
+    
+    # black campaigns -> group ids -> banners
+    if black_campaign_ids:
+        g_ids_black = api.fetch_group_ids_from_campaigns(black_campaign_ids)
+        b_ids_black = api.fetch_banner_ids_from_groups(g_ids_black)
+        blacklist_set.update(b_ids_black)
+    
+    # white campaigns -> group ids -> banners
+    if white_campaign_ids:
+        g_ids_white = api.fetch_group_ids_from_campaigns(white_campaign_ids)
+        b_ids_white = api.fetch_banner_ids_from_groups(g_ids_white)
+        whitelist_set = set(b_ids_white)
+    
+    # white direct banners добавляем
+    if white_banner_ids_direct:
+        if whitelist_set is None:
+            whitelist_set = set()
+        whitelist_set.update(white_banner_ids_direct)
+    
+    # Если whitelist существует, но пустой — тогда просто "ничего не трогать"
+    if whitelist_set is not None and len(whitelist_set) == 0:
+        logger.info("WHITE_LIST задан, но пустой => не трогаем ничего")
+        return
     # Важно: цель (TARGET_ACTION) берём по ad_groups objective
     group_ids: List[int] = []
     for bid in all_ids:
@@ -1226,6 +1454,8 @@ def process_cabinet(
 
     periods = collect_periods_from_filters(templates)
     stats_by_period = build_stats_cache(api, all_ids, periods)
+    stats_all_key = json.dumps({"type": "ALL_TIME"}, sort_keys=True, ensure_ascii=False)
+    stats_all_map = stats_by_period.get(stats_all_key, {}) or {}
 
     dis_path = disabled_file_path(users_root, tg_id, cabinet_id)
     disabled_records = load_disabled_records(dis_path)
@@ -1249,6 +1479,11 @@ def process_cabinet(
             pass
 
     disabled_count = 0
+    effective_max_disables = max_disables
+    if limit_disabled_banners_20:
+        effective_max_disables = min(int(max_disables), 20)
+    else:
+        effective_max_disables = 10**9
     notify_disabled: List[str] = []
     notify_enabled: List[str] = []
 
@@ -1257,7 +1492,23 @@ def process_cabinet(
         if ignore_manual_enabled_ads and str(bid) in disabled_records:
             logger.info(f"▶ Пропускаем баннер {bid}: already in disabled_banners.json и ignore_manual_enabled_ads=true")
             continue
-
+            
+        # --- whitelist/blacklist ---
+        if whitelist_set is not None and bid not in whitelist_set:
+            logger.info(f"▶ Пропускаем баннер {bid}: не в white_list")
+            continue
+        if bid in blacklist_set:
+            logger.info(f"▶ Пропускаем баннер {bid}: в black_list")
+            continue
+        
+        # --- spent_all_time <= 5000 rule ---
+        if only_spent_all_time_lte_5000:
+            s_all = stats_all_map.get(bid, {}) or {}
+            mv_all = metric_value_from_stats(s_all)
+            if mv_all["SPENT"] > 5000.0:
+                logger.info(f"▶ Пропускаем баннер {bid}: spent_all_time={mv_all['SPENT']:.2f} > 5000 (only_spent_all_time_lte_5000=true)")
+                continue
+                
         gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
         ta = banner_target_action_from_groups(gid, group_objectives)
         log_banner_stats(
@@ -1283,7 +1534,7 @@ def process_cabinet(
         if state != "DISABLE":
             continue
 
-        if disabled_count >= max_disables:
+        if disabled_count >= effective_max_disables:
             logger.warning("🚨 Достигнут лимит отключений за запуск — дальнейшие баннеры не будут отключаться")
             break
 
@@ -1325,7 +1576,23 @@ def process_cabinet(
     for bid in blocked_ids:
         if str(bid) not in disabled_records:
             continue
-
+            
+        # --- whitelist/blacklist ---
+        if whitelist_set is not None and bid not in whitelist_set:
+            logger.info(f"▶ Пропускаем баннер {bid}: не в white_list")
+            continue
+        if bid in blacklist_set:
+            logger.info(f"▶ Пропускаем баннер {bid}: в black_list")
+            continue
+        
+        # --- spent_all_time <= 5000 rule ---
+        if only_spent_all_time_lte_5000:
+            s_all = stats_all_map.get(bid, {}) or {}
+            mv_all = metric_value_from_stats(s_all)
+            if mv_all["SPENT"] > 5000.0:
+                logger.info(f"▶ Пропускаем баннер {bid}: spent_all_time={mv_all['SPENT']:.2f} > 5000 (only_spent_all_time_lte_5000=true)")
+                continue
+                
         gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
         ta = banner_target_action_from_groups(gid, group_objectives)
         log_banner_stats(
@@ -1392,14 +1659,53 @@ def process_cabinet(
     logger.info(f"💾 enabled_banners.json:  {en_path} (records={len(enabled_records)})")
     logger.info(f"🧾 history_banners.json:  {his_path}")
 
-    if tg_bot_token and chat_id:
-        if notify_disabled:
-            text = f"<b>[{cabinet_name}]</b>\n<b>Отключены баннеры:</b>\n\n" + "\n\n".join(notify_disabled)
-            tg_notify(tg_bot_token, chat_id, text, dry_run=dry_run)
+    # --- TG notify (batch by history since last send) ---
+    if tg_notify_enabled and tg_bot_token and chat_id:
+        state_path = notify_state_path(users_root, tg_id, cabinet_id)
+        last_notify_utc = load_last_notify_utc(state_path)
 
-        if notify_enabled:
-            text = f"<b>[{cabinet_name}]</b>\n<b>Включены баннеры:</b>\n\n" + "\n\n".join(notify_enabled)
-            tg_notify(tg_bot_token, chat_id, text, dry_run=dry_run)
+        if is_due_to_send(last_notify_utc, tg_notify_every_min):
+            events = read_history_events_since(his_path, last_notify_utc)
+            events = reduce_latest_per_banner(events)
+
+            if events:
+                off = [e for e in events if str(e.get("status")) == "off"]
+                on_ = [e for e in events if str(e.get("status")) == "on"]
+
+                parts: List[str] = [f"<b>[{cabinet_name}]</b>"]
+
+                if off:
+                    lines = []
+                    for e in off:
+                        lines.append(
+                            f"<b>{e.get('name_banner','')}</b> #{e.get('id_banner','')}\n"
+                            f"    ⤷ Причина: {e.get('short_reason','')}\n"
+                            f"    ⤷ Потрачено: {e.get('spent_all_time','')}\n"
+                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')}"
+                        )
+                    parts.append("<b>Отключены баннеры:</b>\n\n" + "\n\n".join(lines))
+
+                if on_:
+                    lines = []
+                    for e in on_:
+                        lines.append(
+                            f"<b>{e.get('name_banner','')}</b> #{e.get('id_banner','')}\n"
+                            f"    ⤷ Причина: {e.get('short_reason','')}\n"
+                            f"    ⤷ Доход: {e.get('income','')}\n"
+                            f"    ⤷ Потрачено: {e.get('spent_all_time','')}\n"
+                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')}"
+                        )
+                    parts.append("<b>Включены баннеры:</b>\n\n" + "\n\n".join(lines))
+
+                tg_notify(tg_bot_token, chat_id, "\n\n".join(parts), dry_run=dry_run)
+                save_last_notify_utc(state_path, dt.datetime.utcnow())
+            else:
+                logger.info("🔕 TG: нет новых событий с момента последней отправки")
+        else:
+            logger.info(f"🔕 TG throttle: уведомления не отправляем (tg_notify_every_min={tg_notify_every_min})")
+    else:
+        if not tg_notify_enabled:
+            logger.info("🔕 TG уведомления отключены (tg_notify_enabled=false)")
 
 
 # ============================================================
@@ -1442,6 +1748,19 @@ def main() -> None:
             settings = load_user_settings(users_root, tg_id)
             ignore_manual_enabled_ads = bool(settings.get("ignore_manual_enabled_ads", False))
 
+            tg_notify_enabled = bool(settings.get("tg_notify_enabled", True))
+            tg_notify_every_min = settings.get("tg_notify_every_min", None)
+            try:
+                tg_notify_every_min = int(tg_notify_every_min) if tg_notify_every_min is not None else None
+            except Exception:
+                tg_notify_every_min = None
+            
+            limit_disabled_banners_20 = bool(settings.get("limit_disabled_banners_20", True))
+            only_spent_all_time_lte_5000 = bool(settings.get("only_spent_all_time_lte_5000", False))
+            
+            white_list = load_user_listfile(users_root, tg_id, "white_list.json")
+            black_list = load_user_listfile(users_root, tg_id, "black_list.json")
+            
             chat_id = str(tg_id)
 
             income_path = str(cfg.get("income_path") or "").strip()
@@ -1475,6 +1794,12 @@ def main() -> None:
                         dry_run=dry_run,
                         max_disables=max_disables,
                         ignore_manual_enabled_ads=ignore_manual_enabled_ads,
+                        tg_notify_enabled=tg_notify_enabled,
+                        tg_notify_every_min=tg_notify_every_min,
+                        limit_disabled_banners_20=limit_disabled_banners_20,
+                        only_spent_all_time_lte_5000=only_spent_all_time_lte_5000,
+                        white_list=white_list,
+                        black_list=black_list,
                     )
                 except Exception as e:
                     logger.exception(f"[USER {tg_id}] Ошибка обработки кабинета {cab.get('name') or cab.get('id')}: {e}")
