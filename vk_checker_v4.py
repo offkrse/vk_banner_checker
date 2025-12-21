@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.63-"
+VERSION = "-4.1.64-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -90,7 +90,15 @@ def safe_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return default
-
+        
+#округление
+def fmt_int(x: Any, default: int = 0) -> str:
+    try:
+        if x is None:
+            return str(default)
+        return str(int(round(float(x))))
+    except Exception:
+        return str(default)
 
 def now_str() -> str:
     return (dt.datetime.now() + dt.timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1288,12 +1296,12 @@ def make_banner_record(
         "short_reason": short_reason or "",
         "status": status,
         "checker_enabled": checker_enabled,
-        "income": f"{float(income):.2f}",
-        "spent_all_time": f"{mv['SPENT']:.2f}",
-        "goals_all_time": f"{mv['RESULTS']:.0f}",
-        "cpa_all_time": f"{mv['RESULT_COST']:.2f}",
-        "clicks_all_time": f"{mv['CLICKS']:.0f}",
-        "cpc_all_time": f"{mv['CLICK_COST']:.2f}",
+        "income": fmt_int(income),
+        "spent_all_time": fmt_int(mv["SPENT"]),
+        "goals_all_time": fmt_int(mv["RESULTS"]),
+        "cpa_all_time": fmt_int(mv["RESULT_COST"]),
+        "clicks_all_time": fmt_int(mv["CLICKS"]),
+        "cpc_all_time": fmt_int(mv["CLICK_COST"]),
     }
 
 # ============================================================
