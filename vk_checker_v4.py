@@ -1771,8 +1771,8 @@ def process_cabinet(
                         lines.append(
                             f"<b>{e.get('name_banner','')}</b> #{e.get('id_banner','')}\n"
                             f"    ⤷ Причина: {e.get('short_reason','')}\n"
-                            f"    ⤷ Потрачено: {e.get('spent_all_time','')}\n"
-                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')}"
+                            f"    ⤷ Потрачено: {e.get('spent_all_time','')} ₽\n"
+                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')} ₽"
                         )
                     parts.append("<b>Отключены баннеры:</b>\n\n" + "\n\n".join(lines))
 
@@ -1782,9 +1782,9 @@ def process_cabinet(
                         lines.append(
                             f"<b>{e.get('name_banner','')}</b> #{e.get('id_banner','')}\n"
                             f"    ⤷ Причина: {e.get('short_reason','')}\n"
-                            f"    ⤷ Доход: {e.get('income','')}\n"
-                            f"    ⤷ Потрачено: {e.get('spent_all_time','')}\n"
-                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')}"
+                            f"    ⤷ Доход: {e.get('income','')} ₽\n"
+                            f"    ⤷ Потрачено: {e.get('spent_all_time','')} ₽\n"
+                            f"    ⤷ Результат: {e.get('goals_all_time','')} | {e.get('cpa_all_time','')} ₽"
                         )
                     parts.append("<b>Включены баннеры:</b>\n\n" + "\n\n".join(lines))
 
