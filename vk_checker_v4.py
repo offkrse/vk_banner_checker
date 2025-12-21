@@ -931,7 +931,7 @@ def conditions_to_reason(
             if mode == "HAS":
                 parts_long.append(f"Доход есть ({income:.2f} ₽). {period_to_label(period)}")
                 parts_short.append(f"Доход {income:.2f} > 0")
-            elif mode in ("NONE", "NO", "EMPTY"):
+            elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 parts_long.append(f"Доход отсутствует ({income:.2f} ₽). {period_to_label(period)}")
                 parts_short.append(f"Доход {income:.2f} = 0")
             else:
