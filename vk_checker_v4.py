@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.6-"
+VERSION = "-4.1.61-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1124,18 +1124,26 @@ def is_due_to_send(last_notify_utc: Optional[dt.datetime], every_min: Optional[i
         return True
     if last_notify_utc is None:
         return True
+
     now_utc = dt.datetime.utcnow()
+    if last_notify_utc > now_utc + dt.timedelta(minutes=1):
+        return True
+
     return (now_utc - last_notify_utc).total_seconds() >= int(every_min) * 60
 
 
 def reduce_latest_per_banner(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # чтобы не спамить одним баннером много раз за окно — оставим последнее событие
     last: Dict[str, Dict[str, Any]] = {}
     for e in events:
         bid = str(e.get("id_banner") or "").strip()
         if bid:
             last[bid] = e
-    return list(last.values())
+
+    def event_utc(e: Dict[str, Any]) -> float:
+        t = parse_history_daytime_to_utc(str(e.get("daytime") or ""))
+        return t.timestamp() if t else 0.0
+
+    return sorted(last.values(), key=event_utc)
 
 def load_disabled_records(path: pathlib.Path) -> Dict[str, Dict[str, str]]:
     if not path.exists():
@@ -1565,12 +1573,6 @@ def process_cabinet(
 
         mv = metric_value_from_stats(stats_all)
         income_all = income_store.income_for_period(bid, {"type": "ALL_TIME"})
-        notify_disabled.append(
-            f"<b>{name}</b> #{bid}\n"
-            f"    ⤷ Потрачено = {mv['SPENT']:.2f} ₽\n"
-            f"    ⤷ Результаты = {mv['RESULTS']:.0f} | {mv['RESULT_COST']:.2f} ₽\n"
-            f"    ⤷ Клики = {mv['CLICKS']:.0f} | {mv['CLICK_COST']:.2f} ₽"
-        )
 
     # 2) ENABLE для blocked (только те, что мы отключали)
     for bid in blocked_ids:
@@ -1644,13 +1646,6 @@ def process_cabinet(
         append_history(his_path, rec)
         mv = metric_value_from_stats(stats_all)
         
-        notify_enabled.append(
-            f"<b>{name}</b> #{bid}\n"
-            f"    ⤷ Потрачено = {mv['SPENT']:.2f} ₽\n"
-            f"    ⤷ Доход = {income_all:.2f} ₽\n"
-            f"    ⤷ Результаты = {mv['RESULTS']:.0f} | {mv['RESULT_COST']:.2f} ₽\n"
-            f"    ⤷ Клики = {mv['CLICKS']:.0f} | {mv['CLICK_COST']:.2f} ₽"
-        )
 
     save_disabled_records(dis_path, disabled_records)
     save_disabled_records(en_path, enabled_records)
