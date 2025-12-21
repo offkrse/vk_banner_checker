@@ -917,31 +917,34 @@ def conditions_to_reason(
             value = safe_float(cond.get("valueRub", 0))
 
             parts_long.append(
-                f"Расход {mv['SPENT']:.2f} ₽ {op_to_human(op)} {value:.2f} ₽. {period_to_label(period)}"
+                f"Расход {fmt_int(mv['SPENT'])} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}"
             )
             parts_short.append(
-                f"Расход {mv['SPENT']:.2f} {op_to_human(op)} {value:.2f}"
+                f"Расход {fmt_int(mv['SPENT'])} {op_to_human(op)} {fmt_int(value)}"
             )
 
         elif ctype == "INCOME":
             period = cond.get("period") or {"type": "ALL_TIME"}
             income = income_store.income_for_period(banner_id, period)
+            income_i = fmt_int(income)
 
             mode = (cond.get("mode") or "HAS").upper()
-            if mode == "HAS":
-                parts_long.append(f"Доход есть ({income:.2f} ₽). {period_to_label(period)}")
-                parts_short.append(f"Доход {income:.2f} > 0")
+            if mode in ("HAS", "EXISTS"):
+                parts_long.append(f"Доход есть ({income_i} ₽). {period_to_label(period)}")
+                parts_short.append(f"Доход {income_i} > 0")
+            
             elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
-                parts_long.append(f"Доход отсутствует ({income:.2f} ₽). {period_to_label(period)}")
-                parts_short.append(f"Доход {income:.2f} = 0")
+                parts_long.append(f"Доход отсутствует ({income_i} ₽). {period_to_label(period)}")
+                parts_short.append(f"Доход {income_i} = 0")
+            
             else:
                 op = (cond.get("op") or "").upper()
-                value = safe_float(cond.get("valueRub", 0))
+                value = safe_float(cond.get("valueRub", cond.get("value", 0)))
                 parts_long.append(
-                    f"Доход {income:.2f} ₽ {op_to_human(op)} {value:.2f} ₽. {period_to_label(period)}"
+                    f"Доход {income_i} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}"
                 )
                 parts_short.append(
-                    f"Доход {income:.2f} {op_to_human(op)} {value:.2f}"
+                    f"Доход {income_i} {op_to_human(op)} {fmt_int(value)}"
                 )
 
         elif ctype == "TARGET_ACTION":
@@ -967,7 +970,7 @@ def eval_cost_rule(
     spent_rub = safe_float(rule.get("spentRub", 0))
     metric = (rule.get("metric") or "").upper()
     op = (rule.get("op") or "EQ").upper()
-    value = safe_float(rule.get("value", 0))
+    value = safe_float(rule.get("value", rule.get("valueRub", 0)))
 
     period = rule.get("period") or {"type": "ALL_TIME"}
     key = json.dumps(period, sort_keys=True, ensure_ascii=False)
@@ -986,11 +989,13 @@ def eval_cost_rule(
         return False, "", ""
 
     reason = (
-        f"{metric_to_human(metric)} {op_to_human(op)} {value:.2f} "
-        f"при расходе ≥ {spent_rub:.2f}. {period_to_label(period)}."
+        f"{metric_to_human(metric)} {op_to_human(op)} {fmt_int(value)} "
+        f"при расходе ≥ {fmt_int(spent_rub)}. {period_to_label(period)}."
     )
-
-    short_reason = f"{metric_to_human(metric)} {actual:.2f} {op_to_human(op)} {value:.2f}"
+    
+    short_reason = (
+        f"{metric_to_human(metric)} {fmt_int(actual)} {op_to_human(op)} {fmt_int(value)}"
+    )
 
     return True, reason, short_reason
 
