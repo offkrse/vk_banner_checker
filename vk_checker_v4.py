@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.64-"
+VERSION = "-4.1.65-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -852,18 +852,21 @@ def eval_conditions(
         elif ctype == "INCOME":
             period = cond.get("period") or {"type": "ALL_TIME"}
             income = income_store.income_for_period(banner_id, period)
-
+        
             mode = (cond.get("mode") or "HAS").upper()
-            if mode == "HAS":
+        
+            if mode in ("HAS", "EXISTS"):
                 if income <= 0:
                     return False
-            elif mode in ("NONE", "NO", "EMPTY"):
+        
+            elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 if income > 0:
                     return False
+        
             else:
-                op = cond.get("op")
+                op = (cond.get("op") or "").upper().strip()
                 if op:
-                    value = safe_float(cond.get("valueRub", 0))
+                    value = safe_float(cond.get("valueRub", cond.get("value", 0)))
                     if not op_compare(income, op, value):
                         return False
                 else:
