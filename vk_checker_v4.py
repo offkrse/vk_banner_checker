@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.61-"
+VERSION = "-4.1.62-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -953,7 +953,7 @@ def eval_filter_node(
 
     hit_bools = [x[0] for x in rule_hits]
     if not hit_bools:
-        matched = False
+        matched = bool(conditions)
     elif mode == "ANY":
         matched = any(hit_bools)
     else:
