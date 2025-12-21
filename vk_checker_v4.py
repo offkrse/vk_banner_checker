@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.4-"
+VERSION = "-4.1.5-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -436,7 +436,7 @@ class VkAdsApi:
             spent = safe_float(base.get("spent", 0))
             cpc = safe_float(base.get("cpc", 0))
             clicks = safe_float(base.get("clicks", base.get("clicks_count", 0)))
-            goals = safe_float(base.get("goals", base.get("goals_count", base.get("results", 0))))
+            goals = safe_float(vk.get("goals", 0))
             vk_cpa = safe_float(vk.get("cpa", 0))
 
             result[_id] = {
@@ -470,7 +470,7 @@ class VkAdsApi:
             spent = safe_float(base.get("spent", 0))
             cpc = safe_float(base.get("cpc", 0))
             clicks = safe_float(base.get("clicks", base.get("clicks_count", 0)))
-            goals = safe_float(base.get("goals", base.get("goals_count", base.get("results", 0))))
+            goals = safe_float(vk.get("goals", 0))
             vk_cpa = safe_float(vk.get("cpa", 0))
 
             result[_id] = {
@@ -526,49 +526,41 @@ class VkAdsApi:
             logger.error(f"Ошибка при включении баннера {banner_id}: {e}")
             return False
 
-    def build_banner_objectives_cache(self) -> Dict[int, str]:
+    def build_groups_objective_cache(self, group_ids: List[int]) -> Dict[int, str]:
         """
-        TARGET_ACTION хранится на уровне групп:
-        GET /api/v2/ad_groups.json?_status=active&limit=200&fields=id,banners,objective&offset=...
-        Строим mapping banner_id -> objective.
+        Получаем objective по ad_group_id:
+        GET /api/v2/ad_groups.json?_id__in=...&fields=id,objective
+        Возвращаем mapping: group_id -> objective
         """
-        if self.banner_objective_cache:
-            return self.banner_objective_cache
-
         url = f"{self.base_url}/api/v2/ad_groups.json"
-        limit = 200
-        offset = 0
         mapping: Dict[int, str] = {}
-
-        while True:
+    
+        uniq = sorted({int(x) for x in group_ids if int(x) > 0})
+        if not uniq:
+            return mapping
+    
+        chunk_size = 200
+        for i in range(0, len(uniq), chunk_size):
+            chunk = uniq[i:i + chunk_size]
             params = {
-                "_status": "active",
-                "limit": limit,
-                "offset": offset,
-                "fields": "id,banners,objective",
+                "_id__in": ",".join(map(str, chunk)),
+                "limit": len(chunk),
+                "fields": "id,objective",
             }
             resp = req_with_retry("GET", url, headers=self.headers, params=params, timeout=STATS_TIMEOUT)
             data = resp.json()
             items = data.get("items", []) or []
-
+    
             for g in items:
-                objective = (g.get("objective") or "").strip()
-                banners = g.get("banners", []) or []
-                if not isinstance(banners, list):
+                try:
+                    gid = int(g.get("id"))
+                except Exception:
                     continue
-                for b in banners:
-                    try:
-                        bid = int(b.get("id"))
-                    except Exception:
-                        continue
-                    mapping[bid] = objective
-
-            if len(items) < limit:
-                break
-            offset += limit
-
-        self.banner_objective_cache = mapping
-        logger.info(f"✅ Загружены objective по группам: banners_with_objective={len(mapping)}")
+                mapping[gid] = (g.get("objective") or "").strip()
+    
+            logger.info(f"ad_groups _id__in chunk {i // chunk_size + 1}: groups={len(items)}")
+    
+        logger.info(f"✅ Загружены objective по группам: groups_with_objective={len(mapping)}")
         return mapping
 
 
@@ -743,8 +735,8 @@ def objective_to_target_action(objective: str) -> str:
     return "APP"
 
 
-def banner_target_action_from_groups(banner_id: int, banner_objectives: Dict[int, str]) -> str:
-    objective = banner_objectives.get(int(banner_id), "")
+def banner_target_action_from_groups(ad_group_id: int, group_objectives: Dict[int, str]) -> str:
+    objective = group_objectives.get(int(ad_group_id), "")
     return objective_to_target_action(objective)
 
 
@@ -796,7 +788,8 @@ def eval_conditions(
             target = (cond.get("target") or "").strip()
             if not target:
                 continue
-            actual = banner_target_action_from_groups(banner_id, banner_objectives)
+            gid = int((banner_obj or {}).get("ad_group_id") or (banner_obj.get("ad_group_id") if isinstance(banner_obj, dict) else 0) or 0)
+            actual = banner_target_action_from_groups(gid, banner_objectives)
             if actual != target:
                 return False
 
@@ -1219,7 +1212,17 @@ def process_cabinet(
     api.fetch_banners_info(all_ids, fields="created,name,content,ad_group_id")
 
     # Важно: цель (TARGET_ACTION) берём по ad_groups objective
-    banner_objectives = api.build_banner_objectives_cache()
+    group_ids: List[int] = []
+    for bid in all_ids:
+        info = api.banner_info_cache.get(bid, {}) or {}
+        gid = info.get("ad_group_id")
+        try:
+            if gid is not None:
+                group_ids.append(int(gid))
+        except Exception:
+            pass
+        
+    group_objectives = api.build_groups_objective_cache(group_ids)
 
     periods = collect_periods_from_filters(templates)
     stats_by_period = build_stats_cache(api, all_ids, periods)
@@ -1255,7 +1258,8 @@ def process_cabinet(
             logger.info(f"▶ Пропускаем баннер {bid}: already in disabled_banners.json и ignore_manual_enabled_ads=true")
             continue
 
-        ta = banner_target_action_from_groups(bid, banner_objectives)
+        gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
+        ta = banner_target_action_from_groups(gid, group_objectives)
         log_banner_stats(
             banner_id=bid,
             periods=periods,
@@ -1273,7 +1277,7 @@ def process_cabinet(
             banner_obj=bobj,
             stats_by_period=stats_by_period,
             income_store=income_store,
-            banner_objectives=banner_objectives,
+            banner_objectives=group_objectives,
         )
 
         if state != "DISABLE":
@@ -1322,7 +1326,8 @@ def process_cabinet(
         if str(bid) not in disabled_records:
             continue
 
-        ta = banner_target_action_from_groups(bid, banner_objectives)
+        gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
+        ta = banner_target_action_from_groups(gid, group_objectives)
         log_banner_stats(
             banner_id=bid,
             periods=periods,
@@ -1340,7 +1345,7 @@ def process_cabinet(
             banner_obj=bobj,
             stats_by_period=stats_by_period,
             income_store=income_store,
-            banner_objectives=banner_objectives,
+            banner_objectives=group_objectives,
         )
         if state != "ENABLE":
             continue
