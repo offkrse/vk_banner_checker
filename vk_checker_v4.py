@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.62-"
+VERSION = "-4.1.63-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -875,6 +875,73 @@ def eval_conditions(
 
     return True
 
+def conditions_to_reason(
+    conditions: List[Dict[str, Any]],
+    banner_id: int,
+    banner_obj: Dict[str, Any],
+    stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
+    income_store: IncomeStore,
+    banner_objectives: Dict[int, str],
+) -> Tuple[str, str]:
+    """
+    Возвращает (reason, short_reason) по условиям.
+    Предполагается, что условия уже ПРОШЛИ (true), но мы всё равно берём фактические значения для текста.
+    """
+    parts_long: List[str] = []
+    parts_short: List[str] = []
+
+    for cond in conditions or []:
+        if not isinstance(cond, dict):
+            continue
+
+        ctype = (cond.get("type") or "").upper()
+
+        if ctype == "SPENT":
+            period = cond.get("period") or {"type": "ALL_TIME"}
+            key = json.dumps(period, sort_keys=True, ensure_ascii=False)
+            stats = stats_by_period.get(key, {}).get(banner_id, {}) or {}
+            mv = metric_value_from_stats(stats)
+
+            op = (cond.get("op") or "GTE").upper()
+            value = safe_float(cond.get("valueRub", 0))
+
+            parts_long.append(
+                f"Расход {mv['SPENT']:.2f} ₽ {op_to_human(op)} {value:.2f} ₽. {period_to_label(period)}"
+            )
+            parts_short.append(
+                f"Расход {mv['SPENT']:.2f} {op_to_human(op)} {value:.2f}"
+            )
+
+        elif ctype == "INCOME":
+            period = cond.get("period") or {"type": "ALL_TIME"}
+            income = income_store.income_for_period(banner_id, period)
+
+            mode = (cond.get("mode") or "HAS").upper()
+            if mode == "HAS":
+                parts_long.append(f"Доход есть ({income:.2f} ₽). {period_to_label(period)}")
+                parts_short.append(f"Доход {income:.2f} > 0")
+            elif mode in ("NONE", "NO", "EMPTY"):
+                parts_long.append(f"Доход отсутствует ({income:.2f} ₽). {period_to_label(period)}")
+                parts_short.append(f"Доход {income:.2f} = 0")
+            else:
+                op = (cond.get("op") or "").upper()
+                value = safe_float(cond.get("valueRub", 0))
+                parts_long.append(
+                    f"Доход {income:.2f} ₽ {op_to_human(op)} {value:.2f} ₽. {period_to_label(period)}"
+                )
+                parts_short.append(
+                    f"Доход {income:.2f} {op_to_human(op)} {value:.2f}"
+                )
+
+        elif ctype == "TARGET_ACTION":
+            target = (cond.get("target") or "").strip()
+            gid = int((banner_obj or {}).get("ad_group_id") or 0)
+            actual = banner_target_action_from_groups(gid, banner_objectives)
+
+            parts_long.append(f"Цель {actual} = {target}")
+            parts_short.append(f"TA {actual}")
+
+    return "; ".join(parts_long).strip(), "; ".join(parts_short).strip()
 
 def eval_cost_rule(
     rule: Dict[str, Any],
@@ -953,7 +1020,7 @@ def eval_filter_node(
 
     hit_bools = [x[0] for x in rule_hits]
     if not hit_bools:
-        matched = bool(conditions)
+        matched = True
     elif mode == "ANY":
         matched = any(hit_bools)
     else:
@@ -1006,16 +1073,34 @@ def decide_action_for_banner(
             continue
 
         conditions = root.get("conditions") or []
+        root_reason = ""
+        root_short = ""
+        
         if isinstance(conditions, list) and conditions:
             if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
                 continue
-
+            root_reason, root_short = conditions_to_reason(
+                conditions=conditions,
+                banner_id=banner_id,
+                banner_obj=banner_obj,
+                stats_by_period=stats_by_period,
+                income_store=income_store,
+                banner_objectives=banner_objectives,
+            )
+        
         child = root.get("child") or {}
         state, reason, short_reason = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+        
         if state and state.upper() != "NOOP":
+            if not reason and root_reason:
+                reason = root_reason
+            if not short_reason and root_short:
+                short_reason = root_short
+        
             tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
             if tpl_name:
                 reason = f"[{tpl_name}] {reason}".strip()
+        
             return state.upper(), reason, short_reason
 
     return "NOOP", "", ""
