@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.65-"
+VERSION = "-4.1.66-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -862,7 +862,23 @@ def eval_conditions(
             elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 if income > 0:
                     return False
-        
+                    
+            elif mode == "COMPARE_SPEND":
+                # spendPeriod (если не задан — используем тот же period)
+                spend_period = cond.get("spendPeriod") or period or {"type": "ALL_TIME"}
+                spend_key = json.dumps(spend_period, sort_keys=True, ensure_ascii=False)
+                spend_stats = stats_by_period.get(spend_key, {}).get(banner_id, {}) or {}
+                mv_spend = metric_value_from_stats(spend_stats)
+                spent = float(mv_spend["SPENT"])
+
+                profit = float(income) - spent  # income - spent
+
+                op = (cond.get("op") or "GTE").upper().strip()
+                threshold = safe_float(cond.get("multiplier", 0), 0.0)  # multiplier = порог прибыли в ₽
+
+                if not op_compare(profit, op, threshold):
+                    return False
+                    
             else:
                 op = (cond.get("op") or "").upper().strip()
                 if op:
@@ -936,7 +952,51 @@ def conditions_to_reason(
             elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 parts_long.append(f"Доход отсутствует ({income_i} ₽). {period_to_label(period)}")
                 parts_short.append(f"Доход {income_i} = 0")
-            
+            elif ctype == "INCOME":
+                period = cond.get("period") or {"type": "ALL_TIME"}
+                income = income_store.income_for_period(banner_id, period)
+                income_i = fmt_int(income)
+
+                mode = (cond.get("mode") or "HAS").upper()
+
+                if mode in ("HAS", "EXISTS"):
+                    parts_long.append(f"Доход есть ({income_i} ₽). {period_to_label(period)}")
+                    parts_short.append(f"Доход {income_i} > 0")
+
+                elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
+                    parts_long.append(f"Доход отсутствует ({income_i} ₽). {period_to_label(period)}")
+                    parts_short.append(f"Доход {income_i} = 0")
+
+                elif mode == "COMPARE_SPEND":
+                    spend_period = cond.get("spendPeriod") or period or {"type": "ALL_TIME"}
+                    spend_key = json.dumps(spend_period, sort_keys=True, ensure_ascii=False)
+                    spend_stats = stats_by_period.get(spend_key, {}).get(banner_id, {}) or {}
+                    mv_spend = metric_value_from_stats(spend_stats)
+                    spent = float(mv_spend["SPENT"])
+
+                    profit = float(income) - spent
+
+                    op = (cond.get("op") or "GTE").upper().strip()
+                    threshold = safe_float(cond.get("multiplier", 0), 0.0)
+
+                    parts_long.append(
+                        f"Прибыль {fmt_int(profit)} ₽ {op_to_human(op)} {fmt_int(threshold)} ₽. "
+                        f"Доход={income_i} ₽ ({period_to_label(period)}), "
+                        f"Расход={fmt_int(spent)} ₽ ({period_to_label(spend_period)})"
+                    )
+                    parts_short.append(
+                        f"Профит {fmt_int(profit)} {op_to_human(op)} {fmt_int(threshold)}"
+                    )
+
+                else:
+                    op = (cond.get("op") or "").upper()
+                    value = safe_float(cond.get("valueRub", cond.get("value", 0)))
+                    parts_long.append(
+                        f"Доход {income_i} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}"
+                    )
+                    parts_short.append(
+                        f"Доход {income_i} {op_to_human(op)} {fmt_int(value)}"
+                    )
             else:
                 op = (cond.get("op") or "").upper()
                 value = safe_float(cond.get("valueRub", cond.get("value", 0)))
@@ -1413,8 +1473,14 @@ def collect_periods_from_filters(templates: List[Dict[str, Any]]) -> List[Dict[s
 
     def walk_node(obj: Any) -> None:
         if isinstance(obj, dict):
+            # обычные period
             if "period" in obj:
                 add_period(obj.get("period"))
+
+            # ВАЖНО: spendPeriod для COMPARE_SPEND
+            if "spendPeriod" in obj:
+                add_period(obj.get("spendPeriod"))
+
             for v in obj.values():
                 walk_node(v)
         elif isinstance(obj, list):
