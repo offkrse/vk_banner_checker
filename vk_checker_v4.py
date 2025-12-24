@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.66-"
+VERSION = "-4.1.70-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -862,31 +862,33 @@ def eval_conditions(
             elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 if income > 0:
                     return False
-                    
+        
+            elif mode == "COMPARE":
+                op = (cond.get("op") or "").upper().strip()
+                if not op:
+                    return False
+                value = safe_float(cond.get("valueRub", cond.get("value", 0)))
+                if not op_compare(income, op, value):
+                    return False
+        
             elif mode == "COMPARE_SPEND":
-                # spendPeriod (если не задан — используем тот же period)
-                spend_period = cond.get("spendPeriod") or period or {"type": "ALL_TIME"}
+                op = (cond.get("op") or "").upper().strip()
+                if not op:
+                    return False
+        
+                threshold = safe_float(cond.get("multiplier", 0))
+        
+                spend_period = cond.get("spendPeriod") or {"type": "ALL_TIME"}
                 spend_key = json.dumps(spend_period, sort_keys=True, ensure_ascii=False)
                 spend_stats = stats_by_period.get(spend_key, {}).get(banner_id, {}) or {}
-                mv_spend = metric_value_from_stats(spend_stats)
-                spent = float(mv_spend["SPENT"])
-
-                profit = float(income) - spent  # income - spent
-
-                op = (cond.get("op") or "GTE").upper().strip()
-                threshold = safe_float(cond.get("multiplier", 0), 0.0)  # multiplier = порог прибыли в ₽
-
-                if not op_compare(profit, op, threshold):
+                spend = metric_value_from_stats(spend_stats)["SPENT"]
+        
+                delta = income - spend
+                if not op_compare(delta, op, threshold):
                     return False
-                    
+        
             else:
-                op = (cond.get("op") or "").upper().strip()
-                if op:
-                    value = safe_float(cond.get("valueRub", cond.get("value", 0)))
-                    if not op_compare(income, op, value):
-                        return False
-                else:
-                    return False
+                return False
 
         elif ctype == "TARGET_ACTION":
             target = (cond.get("target") or "").strip()
@@ -945,67 +947,42 @@ def conditions_to_reason(
             income_i = fmt_int(income)
 
             mode = (cond.get("mode") or "HAS").upper()
+
             if mode in ("HAS", "EXISTS"):
                 parts_long.append(f"Доход есть ({income_i} ₽). {period_to_label(period)}")
                 parts_short.append(f"Доход {income_i} > 0")
-            
+
             elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
                 parts_long.append(f"Доход отсутствует ({income_i} ₽). {period_to_label(period)}")
                 parts_short.append(f"Доход {income_i} = 0")
-            elif ctype == "INCOME":
-                period = cond.get("period") or {"type": "ALL_TIME"}
-                income = income_store.income_for_period(banner_id, period)
-                income_i = fmt_int(income)
 
-                mode = (cond.get("mode") or "HAS").upper()
-
-                if mode in ("HAS", "EXISTS"):
-                    parts_long.append(f"Доход есть ({income_i} ₽). {period_to_label(period)}")
-                    parts_short.append(f"Доход {income_i} > 0")
-
-                elif mode in ("HAS_NOT", "NOT_HAS", "NOT", "NONE", "NO", "EMPTY", "ZERO"):
-                    parts_long.append(f"Доход отсутствует ({income_i} ₽). {period_to_label(period)}")
-                    parts_short.append(f"Доход {income_i} = 0")
-
-                elif mode == "COMPARE_SPEND":
-                    spend_period = cond.get("spendPeriod") or period or {"type": "ALL_TIME"}
-                    spend_key = json.dumps(spend_period, sort_keys=True, ensure_ascii=False)
-                    spend_stats = stats_by_period.get(spend_key, {}).get(banner_id, {}) or {}
-                    mv_spend = metric_value_from_stats(spend_stats)
-                    spent = float(mv_spend["SPENT"])
-
-                    profit = float(income) - spent
-
-                    op = (cond.get("op") or "GTE").upper().strip()
-                    threshold = safe_float(cond.get("multiplier", 0), 0.0)
-
-                    parts_long.append(
-                        f"Прибыль {fmt_int(profit)} ₽ {op_to_human(op)} {fmt_int(threshold)} ₽. "
-                        f"Доход={income_i} ₽ ({period_to_label(period)}), "
-                        f"Расход={fmt_int(spent)} ₽ ({period_to_label(spend_period)})"
-                    )
-                    parts_short.append(
-                        f"Профит {fmt_int(profit)} {op_to_human(op)} {fmt_int(threshold)}"
-                    )
-
-                else:
-                    op = (cond.get("op") or "").upper()
-                    value = safe_float(cond.get("valueRub", cond.get("value", 0)))
-                    parts_long.append(
-                        f"Доход {income_i} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}"
-                    )
-                    parts_short.append(
-                        f"Доход {income_i} {op_to_human(op)} {fmt_int(value)}"
-                    )
-            else:
-                op = (cond.get("op") or "").upper()
+            elif mode == "COMPARE":
+                op = (cond.get("op") or "").upper().strip()
                 value = safe_float(cond.get("valueRub", cond.get("value", 0)))
+                parts_long.append(f"Доход {income_i} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}")
+                parts_short.append(f"Доход {income_i} {op_to_human(op)} {fmt_int(value)}")
+
+            elif mode == "COMPARE_SPEND":
+                op = (cond.get("op") or "").upper().strip()
+                threshold = safe_float(cond.get("multiplier", 0))
+
+                spend_period = cond.get("spendPeriod") or {"type": "ALL_TIME"}
+                spend_key = json.dumps(spend_period, sort_keys=True, ensure_ascii=False)
+                spend_stats = stats_by_period.get(spend_key, {}).get(banner_id, {}) or {}
+                spend = metric_value_from_stats(spend_stats)["SPENT"]
+
+                delta = income - spend
+
                 parts_long.append(
-                    f"Доход {income_i} ₽ {op_to_human(op)} {fmt_int(value)} ₽. {period_to_label(period)}"
+                    f"Δ(доход-расход) {fmt_int(delta)} ₽ {op_to_human(op)} {fmt_int(threshold)} ₽. "
+                    f"Доход: {period_to_label(period)}; Расход: {period_to_label(spend_period)}"
                 )
-                parts_short.append(
-                    f"Доход {income_i} {op_to_human(op)} {fmt_int(value)}"
-                )
+                parts_short.append(f"Δ {fmt_int(delta)} {op_to_human(op)} {fmt_int(threshold)}")
+
+            else:
+                # неизвестный режим
+                parts_long.append(f"Доход {income_i} ₽. {period_to_label(period)}")
+                parts_short.append(f"Доход {income_i}")
 
         elif ctype == "TARGET_ACTION":
             target = (cond.get("target") or "").strip()
@@ -1067,11 +1044,21 @@ def eval_filter_node(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, bool]:
+    """
+    Возвращает:
+      state: DISABLE / ENABLE / NOOP
+      reason: длинная причина (для истории)
+      short_reason: короткая причина (для TG)
+      matched_action: True если был "осознанно сматчен" action в этом узле (включая NOOP),
+                      False если это просто "ничего не нашли" и нужно искать дальше по дереву/шаблонам.
+    """
     if not isinstance(node, dict):
-        return "NOOP", "", ""
+        return "NOOP", "", "", False
 
     ntype = (node.get("type") or "").upper()
+
+    # Если вдруг в дереве встретится не FILTER — спускаемся в child (как и раньше)
     if ntype != "FILTER":
         child = node.get("child")
         return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
@@ -1087,6 +1074,7 @@ def eval_filter_node(
             child = node.get("child")
             return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
+    # считаем срабатывания COST_RULE
     rule_hits: List[Tuple[bool, str, str]] = []
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
@@ -1095,18 +1083,21 @@ def eval_filter_node(
             rule_hits.append((False, "", ""))
 
     hit_bools = [x[0] for x in rule_hits]
+
+    # ВАЖНО:
+    # Если rules пустые, matched НЕ должен становиться True "сам по себе",
+    # иначе пустой FILTER с action:NOOP станет вечным стоп-краном.
     if not hit_bools:
-        matched = True
+        matched = bool(conditions)
     elif mode == "ANY":
         matched = any(hit_bools)
     else:
         matched = all(hit_bools)
 
     if matched:
-        # причина
         reasons = [x[1] for x in rule_hits if x[0] and x[1]]
         short_reasons = [x[2] for x in rule_hits if x[0] and x[2]]
-        
+
         if mode == "ANY":
             reason = reasons[0] if reasons else ""
             short_reason = short_reasons[0] if short_reasons else ""
@@ -1118,9 +1109,13 @@ def eval_filter_node(
         if isinstance(action, dict) and (action.get("type") or "").upper() == "SET_STATE":
             state = (action.get("state") or "NOOP").upper()
             if state in ("DISABLE", "ENABLE", "NOOP"):
-                return state, reason, short_reason
-        return "NOOP", "", ""
+                # matched_action=True => это осознанное решение (в т.ч. NOOP)
+                return state, reason, short_reason, True
 
+        # если action невалидный/нет action — считаем, что решения нет
+        return "NOOP", "", "", False
+
+    # если не matched — идём в child
     child = node.get("child")
     return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
@@ -1148,13 +1143,15 @@ def decide_action_for_banner(
         if not accounts_scope_allows(scope, cabinet_id):
             continue
 
+        # root conditions
         conditions = root.get("conditions") or []
         root_reason = ""
         root_short = ""
-        
+
         if isinstance(conditions, list) and conditions:
             if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
                 continue
+
             root_reason, root_short = conditions_to_reason(
                 conditions=conditions,
                 banner_id=banner_id,
@@ -1163,24 +1160,37 @@ def decide_action_for_banner(
                 income_store=income_store,
                 banner_objectives=banner_objectives,
             )
-        
+
         child = root.get("child") or {}
-        state, reason, short_reason = eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
-        
-        if state and state.upper() != "NOOP":
+        state, reason, short_reason, matched_action = eval_filter_node(
+            child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives
+        )
+
+        # если фильтр реально принял решение (в т.ч. NOOP) — это терминально
+        if matched_action:
             if not reason and root_reason:
                 reason = root_reason
             if not short_reason and root_short:
                 short_reason = root_short
-        
+
             tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
-            if tpl_name:
+            if tpl_name and reason:
                 reason = f"[{tpl_name}] {reason}".strip()
-        
-            return state.upper(), reason, short_reason
+
+            # ВАЖНО: state=NOOP => "не трогать", т.е. останавливаемся и не даём нижним приоритетам трогать
+            if state.upper() == "NOOP":
+                return "NOOP", reason, short_reason
+
+            if state.upper() in ("DISABLE", "ENABLE"):
+                return state.upper(), reason, short_reason
+
+            # на всякий случай
+            return "NOOP", reason, short_reason
+
+        # matched_action=False => этот шаблон не дал решения, смотрим следующий template (по приоритету)
+        continue
 
     return "NOOP", "", ""
-
 
 # ============================================================
 # disabled_banners.json per cabinet
@@ -1694,7 +1704,8 @@ def process_cabinet(
             target_action=ta,
         )
         
-        bobj = active_by_id.get(bid, {})
+        gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
+        bobj = {**(active_by_id.get(bid, {}) or {}), "ad_group_id": gid}
 
         state, reason, short_reason = decide_action_for_banner(
             templates=templates,
@@ -1772,7 +1783,8 @@ def process_cabinet(
             target_action=ta,
         )
         
-        bobj = blocked_by_id.get(bid, {})
+        gid = int((api.banner_info_cache.get(bid, {}) or {}).get("ad_group_id") or 0)
+        bobj = {**(blocked_by_id.get(bid, {}) or {}), "ad_group_id": gid}
 
         state, reason, short_reason = decide_action_for_banner(
             templates=templates,
