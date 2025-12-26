@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.70-"
+VERSION = "-4.1.71-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1088,7 +1088,7 @@ def eval_filter_node(
     # Если rules пустые, matched НЕ должен становиться True "сам по себе",
     # иначе пустой FILTER с action:NOOP станет вечным стоп-краном.
     if not hit_bools:
-        matched = bool(conditions)
+        matched = False
     elif mode == "ANY":
         matched = any(hit_bools)
     else:
@@ -1162,6 +1162,24 @@ def decide_action_for_banner(
             )
 
         child = root.get("child") or {}
+        root_conditions_passed = bool(isinstance(conditions, list) and conditions)
+        
+        if root_conditions_passed and isinstance(child, dict) and (child.get("type") or "").upper() == "FILTER":
+            rules0 = child.get("rules") or []
+            if not isinstance(rules0, list):
+                rules0 = []
+            action0 = child.get("action") or {}
+            if (not rules0) and isinstance(action0, dict) and (action0.get("type") or "").upper() == "SET_STATE":
+                direct_state = (action0.get("state") or "NOOP").upper()
+                if direct_state in ("DISABLE", "ENABLE", "NOOP"):
+                    reason = root_reason or "Условия ROOT выполнены"
+                    short_reason = root_short
+        
+                    tpl_name = str(tpl.get("name") or tpl.get("id") or "").strip()
+                    if tpl_name and reason:
+                        reason = f"[{tpl_name}] {reason}".strip()
+        
+                    return direct_state, reason, short_reason
         state, reason, short_reason, matched_action = eval_filter_node(
             child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives
         )
