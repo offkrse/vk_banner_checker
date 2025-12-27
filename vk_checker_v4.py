@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.71-"
+VERSION = "-4.1.72-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -82,6 +82,9 @@ def load_user_env(users_root: str, tg_id: Optional[str]) -> None:
 def ensure_dir(p: pathlib.Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
+def chunked(lst: List[int], size: int = 200) -> List[List[int]]:
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
 def safe_float(x: Any, default: float = 0.0) -> float:
     try:
@@ -1533,16 +1536,24 @@ def build_stats_cache(
     banner_ids: List[int],
     periods: List[Dict[str, Any]],
 ) -> Dict[str, Dict[int, Dict[str, Any]]]:
+
     out: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
     for period in periods:
         key = json.dumps(period, sort_keys=True, ensure_ascii=False)
+        out[key] = {}
+
         dr = daterange_from_period(period)
-        if dr is None:
-            out[key] = api.stats_summary_banners(banner_ids)
-        else:
-            date_from, date_to = dr
-            out[key] = api.stats_day_banners(banner_ids, date_from, date_to)
+
+        for chunk in chunked(banner_ids, 200):
+            if dr is None:
+                part = api.stats_summary_banners(chunk)
+            else:
+                date_from, date_to = dr
+                part = api.stats_day_banners(chunk, date_from, date_to)
+
+            # аккуратно мержим
+            out[key].update(part)
 
     return out
 
