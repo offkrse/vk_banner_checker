@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.72-"
+VERSION = "-4.1.73-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1078,10 +1078,30 @@ def eval_filter_node(
             return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
 
     # считаем срабатывания COST_RULE
+    # ВАЖНО: RESULT_COST имеет приоритет над CLICK_COST
+    # Если RESULT_COST прошёл — CLICK_COST игнорируется
     rule_hits: List[Tuple[bool, str, str]] = []
+    result_cost_passed = False
+    
+    # Сначала проверяем, прошёл ли хоть один RESULT_COST
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
-            rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
+            metric = (r.get("metric") or "").upper()
+            if metric in ("RESULT_COST", "CPA"):
+                hit, reason, short = eval_cost_rule(r, banner_id, stats_by_period)
+                if hit:
+                    result_cost_passed = True
+                    break
+    
+    # Теперь оцениваем все правила с учётом приоритета RESULT_COST
+    for r in rules:
+        if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
+            metric = (r.get("metric") or "").upper()
+            # Если RESULT_COST прошёл — пропускаем проверку CLICK_COST (считаем её пройденной)
+            if result_cost_passed and metric in ("CLICK_COST", "CPC"):
+                rule_hits.append((True, "", ""))  # CLICK_COST автоматически проходит
+            else:
+                rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
         else:
             rule_hits.append((False, "", ""))
 
