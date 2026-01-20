@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.74-"
+VERSION = "-4.1.75-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1079,12 +1079,12 @@ def eval_filter_node(
 
     # считаем срабатывания COST_RULE
     # ВАЖНО: RESULT_COST имеет приоритет над CLICK_COST
-    # Если есть результаты и RESULT_COST проходит по значению — CLICK_COST игнорируется
+    # Если есть результаты и RESULT_COST НЕ нарушен (в норме) — CLICK_COST игнорируется
     rule_hits: List[Tuple[bool, str, str]] = []
     
-    # Получаем статистику для проверки наличия результатов
-    # Берём период из первого RESULT_COST правила или ALL_TIME
-    result_cost_value_ok = False
+    # Проверяем, есть ли результаты и НЕ нарушено ли правило RESULT_COST
+    # (т.е. RESULT_COST в норме = правило RESULT_COST НЕ срабатывает)
+    result_cost_ok = False  # True = есть результаты и цена результата в норме
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             metric = (r.get("metric") or "").upper()
@@ -1099,18 +1099,19 @@ def eval_filter_node(
                     op = (r.get("op") or "EQ").upper()
                     value = safe_float(r.get("value", r.get("valueRub", 0)))
                     actual_result_cost = mv.get("RESULT_COST", 0)
-                    # Проверяем только значение RESULT_COST, без учёта spentRub
-                    if op_compare(actual_result_cost, op, value):
-                        result_cost_value_ok = True
-                        break
+                    # Проверяем: правило RESULT_COST НЕ срабатывает? (цена в норме)
+                    # Если op=GTE и actual < value — значит в норме
+                    if not op_compare(actual_result_cost, op, value):
+                        result_cost_ok = True
+                break  # проверяем только первое RESULT_COST правило
     
     # Теперь оцениваем все правила с учётом приоритета RESULT_COST
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             metric = (r.get("metric") or "").upper()
-            # Если RESULT_COST в норме — пропускаем проверку CLICK_COST (считаем её пройденной)
-            if result_cost_value_ok and metric in ("CLICK_COST", "CPC"):
-                rule_hits.append((True, "", ""))  # CLICK_COST автоматически проходит
+            # Если RESULT_COST в норме — CLICK_COST не должен срабатывать (принудительно False)
+            if result_cost_ok and metric in ("CLICK_COST", "CPC"):
+                rule_hits.append((False, "", ""))  # CLICK_COST игнорируется
             else:
                 rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
         else:
