@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.73-"
+VERSION = "-4.1.74-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -1079,26 +1079,37 @@ def eval_filter_node(
 
     # считаем срабатывания COST_RULE
     # ВАЖНО: RESULT_COST имеет приоритет над CLICK_COST
-    # Если RESULT_COST прошёл — CLICK_COST игнорируется
+    # Если есть результаты и RESULT_COST проходит по значению — CLICK_COST игнорируется
     rule_hits: List[Tuple[bool, str, str]] = []
-    result_cost_passed = False
     
-    # Сначала проверяем, прошёл ли хоть один RESULT_COST
+    # Получаем статистику для проверки наличия результатов
+    # Берём период из первого RESULT_COST правила или ALL_TIME
+    result_cost_value_ok = False
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             metric = (r.get("metric") or "").upper()
             if metric in ("RESULT_COST", "CPA"):
-                hit, reason, short = eval_cost_rule(r, banner_id, stats_by_period)
-                if hit:
-                    result_cost_passed = True
-                    break
+                period = r.get("period") or {"type": "ALL_TIME"}
+                key = json.dumps(period, sort_keys=True, ensure_ascii=False)
+                stats = stats_by_period.get(key, {}).get(banner_id, {}) or {}
+                mv = metric_value_from_stats(stats)
+                
+                # Если есть результаты (goals > 0)
+                if mv.get("RESULTS", 0) > 0:
+                    op = (r.get("op") or "EQ").upper()
+                    value = safe_float(r.get("value", r.get("valueRub", 0)))
+                    actual_result_cost = mv.get("RESULT_COST", 0)
+                    # Проверяем только значение RESULT_COST, без учёта spentRub
+                    if op_compare(actual_result_cost, op, value):
+                        result_cost_value_ok = True
+                        break
     
     # Теперь оцениваем все правила с учётом приоритета RESULT_COST
     for r in rules:
         if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
             metric = (r.get("metric") or "").upper()
-            # Если RESULT_COST прошёл — пропускаем проверку CLICK_COST (считаем её пройденной)
-            if result_cost_passed and metric in ("CLICK_COST", "CPC"):
+            # Если RESULT_COST в норме — пропускаем проверку CLICK_COST (считаем её пройденной)
+            if result_cost_value_ok and metric in ("CLICK_COST", "CPC"):
                 rule_hits.append((True, "", ""))  # CLICK_COST автоматически проходит
             else:
                 rule_hits.append(eval_cost_rule(r, banner_id, stats_by_period))
