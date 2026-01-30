@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.97"
+VersionVKChecker = "3.1.98"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -124,6 +124,7 @@ class AccountConfig:
     exceptions_campaigns: List[int] = field(default_factory=list)
     exceptions_banners: List[int] = field(default_factory=list)
     check_all_camp: bool = False
+    if_not_income: Optional[float] = None  # Отключить если spent > N и доход = 0
 
     # поля, подтягиваемые из JSON
     name: str = ""
@@ -334,6 +335,7 @@ ACCOUNTS: List[AccountConfig] = [
         user_json_path="/opt/vk_checker/data/users/285360489.json",
         name="Пчелка новый 2025 zk 5005 1",
         check_all_camp=True,
+        if_not_income=800,
         spent_all_time_dont_touch=1000,
         income_json_path="/opt/leads_postback/data/pchelkazaim.json",
         allowed_banners=[],
@@ -344,6 +346,7 @@ ACCOUNTS: List[AccountConfig] = [
         user_json_path="/opt/vk_checker/data/users/285360489.json",
         name="Никита Мишустин 28 августа 7007",
         check_all_camp=True,
+        if_not_income=800,
         spent_all_time_dont_touch=1000,
         income_json_path="/opt/leads_postback/data/pchelkazaim.json",
         allowed_banners=[],
@@ -353,6 +356,7 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/285360489.json",
         name="Мишустин-5959-5919",
+        if_not_income=800,
         check_all_camp=True,
         spent_all_time_dont_touch=1000,
         income_json_path="/opt/leads_postback/data/pchelkazaim.json",
@@ -900,6 +904,26 @@ def process_account(acc: AccountConfig, tg_token: str) -> None:
             logger.info(
                 f"▶ Пропускаем: spent_all_time>{acc.spent_all_time_dont_touch} (не трогаем по правилу)"
             )
+            continue
+
+        # --- Проверка if_not_income: отключаем если потрачено > N и нет дохода ---
+        if acc.if_not_income is not None and spent_all_time > acc.if_not_income and income_all == 0:
+            logger.warning(
+                f"✖ Баннер {bid}: потрачено {spent_all_time:.2f} > {acc.if_not_income}, доход = 0 — ОТКЛЮЧАЕМ"
+            )
+            if disabled_count >= MAX_DISABLES_PER_RUN:
+                logger.warning("🚨 Достигнут лимит отключений за запуск — дальнейшие баннеры не будут отключаться")
+                break
+            disabled = api.disable_banner(bid)
+            if disabled:
+                disabled_count += 1
+                disabled_ids.append(bid)
+                banner_name = api.get_banner_name(bid) or "Без названия"
+                notifications.append(
+                    f"<b>{banner_name}</b> #{bid}\n"
+                    f"    ⤷ Потрачено = {spent_all_time:.2f} ₽ | Доход = 0 ₽\n "
+                    f"    ⤷ Причина: spent > {acc.if_not_income} без дохода"
+                )
             continue
 
         # Проверка фильтра
