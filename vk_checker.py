@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 # ==========================
 # Константы и настройки
 # ==========================
-VersionVKChecker = "3.1.98"
+VersionVKChecker = "3.1.99"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")  # при необходимости переопределить в .env
 STATS_TIMEOUT = 30
 WRITE_TIMEOUT = 30
@@ -356,6 +356,28 @@ ACCOUNTS: List[AccountConfig] = [
     AccountConfig(
         user_json_path="/opt/vk_checker/data/users/285360489.json",
         name="Мишустин-5959-5919",
+        if_not_income=800,
+        check_all_camp=True,
+        spent_all_time_dont_touch=1000,
+        income_json_path="/opt/leads_postback/data/pchelkazaim.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/285360489.json",
+        name="Никита Мишустин бонусный zk 5005",
+        if_not_income=800,
+        check_all_camp=True,
+        spent_all_time_dont_touch=1000,
+        income_json_path="/opt/leads_postback/data/pchelkazaim.json",
+        allowed_banners=[],
+        exceptions_campaigns=[],
+        exceptions_banners=[],
+    ),
+    AccountConfig(
+        user_json_path="/opt/vk_checker/data/users/285360489.json",
+        name="Мишустин 2-5919",
         if_not_income=800,
         check_all_camp=True,
         spent_all_time_dont_touch=1000,
