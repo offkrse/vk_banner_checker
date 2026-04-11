@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ============================================================
 # Общие настройки
 # ============================================================
-VERSION = "-4.1.75-"
+VERSION = "-4.1.80-"
 BASE_URL = os.environ.get("VK_ADS_BASE_URL", "https://ads.vk.com")
 
 STATS_TIMEOUT = 30
@@ -835,7 +835,18 @@ def eval_conditions(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
+    templates: Optional[List[Dict[str, Any]]] = None,
+    cabinet_id: Optional[str] = None,
+    _filter_match_stack: Optional[set] = None,
 ) -> bool:
+    """
+    Проверяет список условий (AND логика).
+    templates и cabinet_id нужны для FILTER_MATCH.
+    _filter_match_stack используется для предотвращения бесконечной рекурсии.
+    """
+    if _filter_match_stack is None:
+        _filter_match_stack = set()
+        
     for cond in conditions or []:
         if not isinstance(cond, dict):
             continue
@@ -902,9 +913,114 @@ def eval_conditions(
             if actual != target:
                 return False
 
+        elif ctype == "FILTER_MATCH":
+            # Проверяем совпадение другого фильтра
+            filter_id = (cond.get("filterId") or "").strip()
+            should_match = cond.get("shouldMatch", True)
+            
+            if not filter_id or not templates:
+                # Если фильтр не выбран или нет списка шаблонов — условие не выполняется
+                return False
+            
+            # Защита от бесконечной рекурсии
+            if filter_id in _filter_match_stack:
+                logger.warning(f"FILTER_MATCH: обнаружена циклическая ссылка на фильтр {filter_id}")
+                return False
+            
+            # Ищем фильтр по ID
+            target_tpl = None
+            for t in templates:
+                if str(t.get("id", "")) == filter_id:
+                    target_tpl = t
+                    break
+            
+            if not target_tpl:
+                # Фильтр не найден
+                return False
+            
+            # Проверяем, проходит ли баннер через этот фильтр
+            filter_matches = check_filter_matches(
+                tpl=target_tpl,
+                cabinet_id=cabinet_id or "",
+                banner_id=banner_id,
+                banner_obj=banner_obj,
+                stats_by_period=stats_by_period,
+                income_store=income_store,
+                banner_objectives=banner_objectives,
+                templates=templates,
+                _filter_match_stack=_filter_match_stack | {filter_id},
+            )
+            
+            # should_match=True означает "фильтр проходит"
+            # should_match=False означает "фильтр не проходит"
+            if should_match and not filter_matches:
+                return False
+            if not should_match and filter_matches:
+                return False
+
         else:
+            # Неизвестный тип условия
             return False
 
+    return True
+
+
+def check_filter_matches(
+    tpl: Dict[str, Any],
+    cabinet_id: str,
+    banner_id: int,
+    banner_obj: Dict[str, Any],
+    stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
+    income_store: IncomeStore,
+    banner_objectives: Dict[int, str],
+    templates: Optional[List[Dict[str, Any]]] = None,
+    _filter_match_stack: Optional[set] = None,
+) -> bool:
+    """
+    Проверяет, проходит ли баннер через фильтр (без применения действия).
+    Возвращает True если все условия фильтра выполнены.
+    """
+    root = tpl.get("root") if "root" in tpl else tpl.get("ROOT")
+    if not isinstance(root, dict):
+        return False
+    
+    # Проверяем scope
+    scope = root.get("accountsScope") or {}
+    if not accounts_scope_allows(scope, cabinet_id):
+        return False
+    
+    # Проверяем root conditions
+    conditions = root.get("conditions") or []
+    if isinstance(conditions, list) and conditions:
+        if not eval_conditions(
+            conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives,
+            templates=templates, cabinet_id=cabinet_id, _filter_match_stack=_filter_match_stack
+        ):
+            return False
+    
+    # Проверяем child (FILTER node)
+    child = root.get("child") or {}
+    if isinstance(child, dict) and (child.get("type") or "").upper() == "FILTER":
+        rules = child.get("rules") or []
+        if isinstance(rules, list) and rules:
+            mode = (child.get("mode") or "ALL").upper()
+            rule_results = []
+            
+            for r in rules:
+                if isinstance(r, dict) and (r.get("type") or "").upper() == "COST_RULE":
+                    ok, _, _ = eval_cost_rule(r, banner_id, stats_by_period)
+                    rule_results.append(ok)
+                else:
+                    rule_results.append(False)
+            
+            if rule_results:
+                if mode == "ANY":
+                    if not any(rule_results):
+                        return False
+                else:  # ALL
+                    if not all(rule_results):
+                        return False
+    
     return True
 
 def conditions_to_reason(
@@ -995,6 +1111,13 @@ def conditions_to_reason(
             parts_long.append(f"Цель {actual} = {target}")
             parts_short.append(f"TA {actual}")
 
+        elif ctype == "FILTER_MATCH":
+            filter_id = (cond.get("filterId") or "").strip()
+            should_match = cond.get("shouldMatch", True)
+            match_text = "проходит" if should_match else "не проходит"
+            parts_long.append(f"Фильтр {filter_id} {match_text}")
+            parts_short.append(f"Фильтр {match_text}")
+
     return "; ".join(parts_long).strip(), "; ".join(parts_short).strip()
 
 def eval_cost_rule(
@@ -1047,6 +1170,8 @@ def eval_filter_node(
     stats_by_period: Dict[str, Dict[int, Dict[str, Any]]],
     income_store: IncomeStore,
     banner_objectives: Dict[int, str],
+    templates: Optional[List[Dict[str, Any]]] = None,
+    cabinet_id: Optional[str] = None,
 ) -> Tuple[str, str, str, bool]:
     """
     Возвращает:
@@ -1064,7 +1189,7 @@ def eval_filter_node(
     # Если вдруг в дереве встретится не FILTER — спускаемся в child (как и раньше)
     if ntype != "FILTER":
         child = node.get("child")
-        return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+        return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives, templates, cabinet_id)
 
     mode = (node.get("mode") or "ALL").upper()
     rules = node.get("rules") or []
@@ -1073,9 +1198,9 @@ def eval_filter_node(
 
     conditions = node.get("conditions") or []
     if isinstance(conditions, list) and conditions:
-        if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
+        if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives, templates, cabinet_id):
             child = node.get("child")
-            return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+            return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives, templates, cabinet_id)
 
     # считаем срабатывания COST_RULE
     # ВАЖНО: RESULT_COST имеет приоритет над CLICK_COST
@@ -1143,8 +1268,11 @@ def eval_filter_node(
         action = node.get("action") or {}
         if isinstance(action, dict) and (action.get("type") or "").upper() == "SET_STATE":
             state = (action.get("state") or "NOOP").upper()
-            if state in ("DISABLE", "ENABLE", "NOOP"):
-                # matched_action=True => это осознанное решение (в т.ч. NOOP)
+            if state in ("DISABLE", "ENABLE", "NOOP", "STUB"):
+                # matched_action=True => это осознанное решение (в т.ч. NOOP и STUB)
+                # STUB = заглушка, просто пропускаем этот фильтр (matched_action=False)
+                if state == "STUB":
+                    return "NOOP", "", "", False
                 return state, reason, short_reason, True
 
         # если action невалидный/нет action — считаем, что решения нет
@@ -1152,7 +1280,7 @@ def eval_filter_node(
 
     # если не matched — идём в child
     child = node.get("child")
-    return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives)
+    return eval_filter_node(child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives, templates, cabinet_id)
 
 
 def decide_action_for_banner(
@@ -1184,7 +1312,7 @@ def decide_action_for_banner(
         root_short = ""
 
         if isinstance(conditions, list) and conditions:
-            if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives):
+            if not eval_conditions(conditions, banner_id, banner_obj, stats_by_period, income_store, banner_objectives, templates=templates, cabinet_id=cabinet_id):
                 continue
 
             root_reason, root_short = conditions_to_reason(
@@ -1206,7 +1334,10 @@ def decide_action_for_banner(
             action0 = child.get("action") or {}
             if (not rules0) and isinstance(action0, dict) and (action0.get("type") or "").upper() == "SET_STATE":
                 direct_state = (action0.get("state") or "NOOP").upper()
-                if direct_state in ("DISABLE", "ENABLE", "NOOP"):
+                if direct_state in ("DISABLE", "ENABLE", "NOOP", "STUB"):
+                    # STUB = заглушка, пропускаем этот фильтр и идём к следующему
+                    if direct_state == "STUB":
+                        continue
                     reason = root_reason or "Условия ROOT выполнены"
                     short_reason = root_short
         
@@ -1216,7 +1347,8 @@ def decide_action_for_banner(
         
                     return direct_state, reason, short_reason
         state, reason, short_reason, matched_action = eval_filter_node(
-            child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives
+            child, banner_id, banner_obj, stats_by_period, income_store, banner_objectives,
+            templates=templates, cabinet_id=cabinet_id
         )
 
         # если фильтр реально принял решение (в т.ч. NOOP) — это терминально
